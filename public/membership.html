@@ -4,14 +4,18 @@
 <body class="recharge-body" data-payment-view="plans">
 <header class="recharge-header"><a class="brand" href="/"><span class="logo">译</span><span>满绩速翻<small>CLASS NOTES</small></span></a><a class="recharge-back" href="/profile">← 返回个人中心</a></header>
 <main class="recharge-page">
-<div class="recharge-heading"><div class="eyebrow">MEMBERSHIP</div><h1>会员充值</h1><p>每期 30 天，按次购买，不自动扣费。</p><a href="/membership/orders">查看我的订单 →</a></div>
-<p id="payment-message" class="payment-message" role="status">正在确认支付服务…</p><a id="payment-login" class="profile-route-button" href="/profile?login=1&amp;next=membership" hidden>登录后选择套餐 →</a>
+<div class="recharge-heading"><div class="eyebrow">MEMBERSHIP</div><h1>会员充值</h1><p>每期 30 天，按次购买，不自动扣费。</p><a href="/membership/orders">查看在线支付订单 →</a></div>
+<p id="payment-message" class="payment-message" role="status">购买会员请添加企业微信，联系客服确认付款与开通。</p><a id="payment-login" class="profile-route-button" href="/profile?login=1&amp;next=membership" hidden>登录或注册账号 →</a>
 <div class="recharge-plans" aria-label="会员价格">
-<section class="recharge-plan"><h2>普通会员</h2><p class="recharge-price"><span>人民币</span>15<small>元 / 30 天</small></p><button type="button" data-buy="regular30" disabled>选择普通会员</button></section>
-<section class="recharge-plan recharge-gold"><h2>金会员</h2><p class="recharge-price"><span>人民币</span>50<small>元 / 30 天</small></p><span class="recharge-unlimited">不限量</span><button type="button" data-buy="premium30" disabled>选择金会员</button></section>
+<section class="recharge-plan"><h2>普通会员</h2><p class="recharge-price"><span>人民币</span>15<small>元 / 30 天</small></p><a class="plan-contact" href="#wecom-contact">添加企业微信购买</a><button type="button" data-buy="regular30" hidden disabled>在线购买普通会员</button></section>
+<section class="recharge-plan recharge-gold"><h2>金会员</h2><p class="recharge-price"><span>人民币</span>50<small>元 / 30 天</small></p><span class="recharge-unlimited">不限量</span><a class="plan-contact" href="#wecom-contact">添加企业微信购买</a><button type="button" data-buy="premium30" hidden disabled>在线购买金会员</button></section>
 </div>
-<section class="payment-rules"><h2>购买与退款规则</h2><ul><li>每期为连续 30 × 24 小时，不按自然月计算。</li><li>续费排在已有有效期和已购套餐之后；没有有效会员时，确认到账后开通。</li><li>不同等级套餐按购买确认顺序生效，不立即升级、不按差价折算。付款页展示预计生效时间。</li><li>退款需联系客服审核。确认退款成功后，按该订单累计退款比例减少时长，最多扣除该订单尚未使用的时长；后续已购时长向前衔接。会员码和管理员赠送权益单独保留。</li><li>订单金额均为人民币。金会员沿用现有权益，仍受服务可用性与防滥用限制约束。</li></ul></section>
-<figure class="recharge-contact"><img src="/membership-contact.jpg" width="888" height="1140" alt="微信客服联系二维码"><figcaption>扫码联系人工客服；此图用于咨询，不是在线支付订单二维码。</figcaption></figure>
+<section id="wecom-contact" class="wecom-contact" tabindex="-1" aria-labelledby="wecom-title">
+<div class="wecom-copy"><span class="wecom-tag">企业微信客服</span><h2 id="wecom-title">添加企业微信，联系付款开通</h2><p>用微信扫一扫，添加「耿源 · yuan 科技」。</p><ol><li>与客服确认所选套餐及付款方式。</li><li>提供本站注册账号，确认付款后由客服协助开通。</li></ol><p id="wecom-selection" class="wecom-selection" role="status" hidden></p><a class="wecom-save" href="/membership-wecom.jpg" download="满绩速翻-企业微信名片.jpg">保存企业微信名片 ↓</a><small>开通后，在个人中心核对会员状态与有效期。人工开通时间与付款安排以客服确认结果为准。</small></div>
+<figure class="wecom-figure"><div class="wecom-code"><img src="/membership-wecom.jpg" width="1320" height="2868" alt="扫码添加耿源的企业微信" decoding="async"></div><figcaption>用微信扫码添加企业微信</figcaption></figure>
+</section>
+<section id="online-payment-rules" class="payment-rules" hidden><h2>购买与退款规则</h2><ul><li>每期为连续 30 × 24 小时，不按自然月计算。</li><li>续费排在已有有效期和已购套餐之后；没有有效会员时，确认到账后开通。</li><li>不同等级套餐按购买确认顺序生效，不立即升级、不按差价折算。付款页展示预计生效时间。</li><li>退款需联系客服审核。确认退款成功后，按该订单累计退款比例减少时长，最多扣除该订单尚未使用的时长；后续已购时长向前衔接。会员码和管理员赠送权益单独保留。</li><li>订单金额均为人民币。金会员沿用现有权益，仍受服务可用性与防滥用限制约束。</li></ul></section>
+
 </main>
 <script type="module" src="/membership.js"></script>
 </body></html>

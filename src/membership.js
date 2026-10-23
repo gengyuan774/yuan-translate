@@ -48,12 +48,18 @@ async function refreshCheckout(check=false){
  try{const data=await api('/api/payments/orders/'+currentOrder.id+(check?'/check':''),check?{}:undefined);renderCheckout(data.order);}
  catch(e){if(e.status===401)loginNeeded();else message(e.message);}finally{busy=false;$('payment-check').disabled=false;}
 }
+if(view==='plans')for(const link of document.querySelectorAll('.plan-contact'))link.addEventListener('click',()=>{
+ const selection=$('wecom-selection');selection.textContent='已选择'+link.closest('.recharge-plan').querySelector('h2').textContent+'。添加企业微信后，请告知客服所选套餐及本站账号。';selection.hidden=false;
+ $('wecom-contact').focus({preventScroll:true});
+});
 async function init(){
  try{
   const [account,config]=await Promise.all([api('/api/account'),api('/api/payments/config')]);user=account.user;enabled=config.enabled;
   if(view==='plans'){
-   message(!enabled?'在线支付尚未开通，暂时无法在线购买。下方微信二维码仅用于咨询客服。':user?'已登录。选择套餐后会生成订单，请核对金额和生效时间后扫码付款。':'请先登录，再选择套餐。');$('payment-login').hidden=!!user;
-   for(const button of document.querySelectorAll('[data-buy]')){button.disabled=!enabled;button.onclick=async()=>{
+   message(!enabled?'购买会员请添加企业微信。确认套餐与付款后，由客服协助开通。':user?'已登录。选择套餐后会生成订单，请核对金额和生效时间后扫码付款。':'请先登录，再选择套餐。');$('payment-login').hidden=!!user;
+   for(const link of document.querySelectorAll('.plan-contact'))link.hidden=enabled;
+   $('online-payment-rules').hidden=!enabled;
+   for(const button of document.querySelectorAll('[data-buy]')){button.hidden=!enabled;button.disabled=!enabled;button.onclick=async()=>{
     if(!user){location.assign('/profile?login=1&next=membership');return;}if(busy)return;busy=true;button.disabled=true;
     const planId=button.dataset.buy,key='payment-request:'+user.id+':'+planId;let requestId;
     try{requestId=sessionStorage.getItem(key)||crypto.randomUUID();sessionStorage.setItem(key,requestId);}catch{requestId=crypto.randomUUID();}
