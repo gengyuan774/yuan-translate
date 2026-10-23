@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>云端课堂 · 满绩速翻</title><link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/recover.css"></head>
+<body>
+<header><a class="brand" href="/">满绩速翻</a><a href="/profile">个人中心</a></header>
+<main>
+<div class="eyebrow">课堂记录</div><h1 id="title">查看云端课堂</h1>
+<p class="muted">此页面只用于阅读和下载，不会替换设备上的课堂记录。</p>
+<div class="status"><p id="message" role="status" aria-live="polite">正在读取云端课堂…</p><div class="actions"><a id="login" href="/profile?login=1" target="_blank" rel="noopener" hidden>打开登录页面 ↗</a><button id="retry" type="button">重新读取</button></div></div>
+<div id="record" hidden><p id="details" class="muted"></p>
+<nav class="downloads" aria-label="下载课堂笔记"><button type="button" data-download="pdf-summary">下载课堂总结 PDF</button><button type="button" data-download="pdf-transcript">下载双语记录 PDF</button><button type="button" data-download="md">下载完整 Markdown</button></nav>
+<section><h2>课堂总结</h2><div id="summary"></div></section>
+<section><h2>双语对照记录</h2><div id="transcript"></div></section></div>
+</main><script type="module" src="/recover.js"></script>
+</body></html>

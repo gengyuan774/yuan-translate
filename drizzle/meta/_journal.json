@@ -1,0 +1,55 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1790930453450,
+      "tag": "0000_small_gwen_stacy",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790931593538,
+      "tag": "0001_melted_sabra",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791275671618,
+      "tag": "0002_outstanding_outlaw_kid",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1791277337537,
+      "tag": "0003_sad_carmella_unuscione",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1791371312132,
+      "tag": "0004_worried_nextwave",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1791372160632,
+      "tag": "0005_cool_lake",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792691077165,
+      "tag": "0006_cynical_magdalene",
+      "breakpoints": true
+    }
+  ]
+}

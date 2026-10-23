@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>会员充值 · 满绩速翻</title><link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/payments.css"></head>
+<body class="recharge-body" data-payment-view="plans">
+<header class="recharge-header"><a class="brand" href="/"><span class="logo">译</span><span>满绩速翻<small>CLASS NOTES</small></span></a><a class="recharge-back" href="/profile">← 返回个人中心</a></header>
+<main class="recharge-page">
+<div class="recharge-heading"><div class="eyebrow">MEMBERSHIP</div><h1>会员充值</h1><p>每期 30 天，按次购买，不自动扣费。</p><a href="/membership/orders">查看我的订单 →</a></div>
+<p id="payment-message" class="payment-message" role="status">正在确认支付服务…</p><a id="payment-login" class="profile-route-button" href="/profile?login=1&amp;next=membership" hidden>登录后选择套餐 →</a>
+<div class="recharge-plans" aria-label="会员价格">
+<section class="recharge-plan"><h2>普通会员</h2><p class="recharge-price"><span>人民币</span>15<small>元 / 30 天</small></p><button type="button" data-buy="regular30" disabled>选择普通会员</button></section>
+<section class="recharge-plan recharge-gold"><h2>金会员</h2><p class="recharge-price"><span>人民币</span>50<small>元 / 30 天</small></p><span class="recharge-unlimited">不限量</span><button type="button" data-buy="premium30" disabled>选择金会员</button></section>
+</div>
+<section class="payment-rules"><h2>购买与退款规则</h2><ul><li>每期为连续 30 × 24 小时，不按自然月计算。</li><li>续费排在已有有效期和已购套餐之后；没有有效会员时，确认到账后开通。</li><li>不同等级套餐按购买确认顺序生效，不立即升级、不按差价折算。付款页展示预计生效时间。</li><li>退款需联系客服审核。确认退款成功后，按该订单累计退款比例减少时长，最多扣除该订单尚未使用的时长；后续已购时长向前衔接。会员码和管理员赠送权益单独保留。</li><li>订单金额均为人民币。金会员沿用现有权益，仍受服务可用性与防滥用限制约束。</li></ul></section>
+<figure class="recharge-contact"><img src="/membership-contact.jpg" width="888" height="1140" alt="微信客服联系二维码"><figcaption>扫码联系人工客服；此图用于咨询，不是在线支付订单二维码。</figcaption></figure>
+</main>
+<script type="module" src="/membership.js"></script>
+</body></html>

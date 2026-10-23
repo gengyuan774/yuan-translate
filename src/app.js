@@ -1,0 +1,439 @@
+import {translationMode} from './models.js';
+import {MAJORS,majorName} from './majors.js';
+import {initAccountSecurity} from './security-ui.js';
+import {openLocalMicrophone} from './microphone.js';
+import {LANGUAGES,language,direction} from './languages.js';
+import {setAccount,accountId,storageDescription,getMajorPreference,saveMajorPreference,setSessionPinned,sessionSyncPending,getTranslationModePreference,saveTranslationModePreference} from './storage.js';
+import {refreshAccess,login,useMembership} from './access.js';
+import {renderNotes} from '../public/format.js';
+import {localApi} from './local-api.js';
+import {downloadNotes} from './download.js';
+import {BrowserLive} from './live.js';
+import {closeFailedConnection} from './live-failure.js';
+import {initTranscriptFollow} from './transcript-follow.js';
+import {initSubtitleFloat} from './subtitle-float.js';
+import {rememberClassroom,restoreClassroom} from './classroom-navigation.js';
+import {PROFILE_PAGES,profileRoute,profilePath,profileLoginDestination} from './profile-routes.js';
+const $=id=>document.getElementById(id);
+const transcriptFollow=initTranscriptFollow($('transcript'),$('autoscroll'),$('follow-latest'));
+initSubtitleFloat({button:$('subtitle-float'),transcript:$('transcript'),partial:$('partial'),status:$('status'),timer:$('timer'),message:$('message'),title:$('breadcrumb-title'),onReturn:showClassroom,notify:notice});
+let config, current=null, ws=null, stream=null, context=null, capture=null, muted=null, micSource=null, micLabel='', mode='idle', startedAt=0, elapsed=0, tick;
+const pendingSync=new Set();
+let exportBusy=false, materialBusy=false, languageBusy=false, selectedLanguage='auto', profileUser=null, historyWarning='';
+let profileView=profileRoute(location.pathname,location.search)||'overview';
+$('source-language').innerHTML=LANGUAGES.map(l=>`<option value="${l.code}">${l.label} → 中文</option>`).join('');
+let translationModeBusy=false,preferredTranslationMode='accurate';
+let majorBusy=false,accountBusy=false,passwordEnabled=false,passwordRegister=false,phoneEnabled=false,phoneChallenge='',phoneRetryAt=0;
+let phoneTimer;
+let flushResolver, wakeLock, partials=new Map(), lastEnded=false;
+const escape=s=>String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const time=ms=>{const s=Math.max(0,Math.floor(ms/1000));return [Math.floor(s/3600),Math.floor(s/60)%60,s%60].map(x=>String(x).padStart(2,'0')).join(':');};
+function notice(text){$('message').textContent=text;$('message').hidden=!text;}
+async function summaryReady(){
+ const pending=accountId()&&await sessionSyncPending(current.id).catch(()=>true);
+ notice('总结已就绪，'+(pending?'笔记已保存在此设备，账户同步待完成；可直接下载 PDF。':accountId()?'完整笔记已保存到账户。':'完整笔记已保存在当前浏览器。'));
+ if($('auto-export').checked)await download('pdf-summary');
+}
+async function api(path,options={}){return localApi(path,options);}
+function updateTranslationModeLabel(){const active=['recording','paused','connecting','finishing'].includes(mode);$('translation-mode-badge').textContent=translationMode(active?current?.translationMode:preferredTranslationMode).label;}
+function controls(next){
+ mode=next;const recording=mode==='recording',busy=['connecting','finishing'].includes(mode),live=['recording','paused'].includes(mode);
+ $('start').hidden=live || mode==='finishing';$('start').disabled=busy;$('start').textContent=mode==='connecting'?'正在连接…':current?.segments.length&&!current.demo?'继续这节课':'● 开始上课';
+ $('pause').hidden=!live;$('pause').textContent=mode==='paused'?'▶ 继续录音':'Ⅱ 暂停';$('finish').hidden=!live && mode!=='finishing';$('finish').disabled=mode==='finishing'||languageBusy;$('pause').disabled=languageBusy;
+ $('new-class').disabled=busy||live||materialBusy||languageBusy;$('demo').disabled=busy||live||materialBusy||languageBusy;$('title').disabled=busy||live||!!current;
+ $('status-dot').classList.toggle('live',recording);document.querySelector('.meter').classList.toggle('live',recording);
+ $('status').textContent=({idle:'准备就绪',connecting:'连接中',recording:'正在听课',paused:'已暂停',finishing:'正在整理课堂',ended:'课堂已结束'})[mode];
+ $('status-detail').textContent=recording?(micLabel||'本机麦克风')+' · '+direction(selectedLanguage):mode==='paused'?'点击继续录音，接着记录课堂':mode==='finishing'?'请保持页面打开，笔记正在生成':'优先使用本机麦克风 · '+direction(selectedLanguage);
+ $('retry-summary').disabled=busy||live||materialBusy||languageBusy;updateMaterialControls();updateLanguageUI();updateTranslationModeLabel();
+}
+function updateLanguageUI(){
+ $('source-language').value=selectedLanguage;
+ $('source-language').disabled=materialBusy||languageBusy||!!current?.demo||['recording','connecting','finishing'].includes(mode);
+ $('source-language').title=mode==='recording'?'暂停录音后可切换语言':'';
+ $('language-pair').textContent=direction(selectedLanguage);
+}
+$('source-language').onchange=async e=>{
+ const code=e.target.value,previous=selectedLanguage;languageBusy=true;controls(mode);
+ try{
+  if(current)current=mode==='paused'&&ws?.readyState===1?await ws.changeLanguage(code):await api('/api/sessions/'+current.id,{method:'PATCH',body:JSON.stringify({sourceLanguage:code})});
+  selectedLanguage=code;notice(mode==='paused'?'已选择 '+direction(code)+'，继续录音后生效。':'');if(current)render();
+ }catch(e){selectedLanguage=previous;notice(e.message);}finally{languageBusy=false;controls(mode);}
+};
+function render(){
+ if(!current)return;updateTranslationModeLabel();
+ const visibleSegments=current.segments.filter(s=>s.source?.trim()||s.translation?.trim());
+ $('breadcrumb-title').textContent=current.title;$('title').value=current.title;$('segment-count').textContent=`${visibleSegments.length} 段`;
+ transcriptFollow.render(visibleSegments.length?visibleSegments.map(s=>`<article class="segment" data-segment-id="${escape(s.id)}"><time>${time(s.offset)}</time>${s.source?.trim()?`<p class="source">${escape(s.source)}</p>`:''}<p class="translation"${s.translation?.trim()?'':' hidden'}>${escape(s.translation)}</p>${s.error?`<p class="error">${escape(s.error)}</p>`:''}</article>`).join(''):(current.segments.length?'':initialEmpty));
+ $('summary').hidden=!current.summary;$('summary-empty').hidden=!!current.summary;$('summary').innerHTML=renderNotes(current.summary);
+ $('summary-badge').textContent=current.demo?'示例笔记':current.summary?'已生成':current.status==='summary_failed'?'需重试':current.status==='summarizing'?'生成中':'待生成';
+ updateExportControls();
+ $('retry-summary').hidden=(!current.segments.some(s=>s.source)&&!current.materials?.some(m=>m.enabled!==false))||['recording','connecting','finishing'].includes(mode);$('retry-summary').textContent=current.segments.some(s=>s.source)?(current.summary?'更新课堂总结':'生成课堂总结'):'生成资料预习总结';renderMaterials();if(current.summaryStale)$('summary-badge').textContent='资料已更新 · 待重新总结';
+ $('save-state').textContent=current.demo?'演示数据 · 不调用 API':(historyWarning?'已保存在此设备 · 账户同步待完成':pendingSync.has(current.id)?'已保存在此设备 · 等待账户同步':accountId()?'已保存到账户':'已保存在当前浏览器');
+ const warnings=current.warnings || [];if(warnings.length)notice(warnings.at(-1));
+}
+async function history(){
+ const owner=accountId(),list=await api('/api/sessions');if(owner!==accountId())return;renderProfileHistory(list);$('history-count').textContent=list.length;$('history-select').innerHTML='<option value="">历史课堂</option>'+list.map(s=>`<option value="${s.id}">${escape(s.title)}</option>`).join('');
+ $('history').innerHTML=list.length?list.map(s=>`<div class="history-item ${s.id===current?.id?'active':''} ${s.pinned?'pinned':''}" data-id="${s.id}"><button class="history-open" data-history-action="open"><strong>${s.demo?'◌':'▤'} ${escape(s.title)}</strong><small>${new Date(s.createdAt).toLocaleDateString('zh-CN')} · ${s.count} 段${s.demo?' · 示例':''}</small></button><div class="history-actions"><button data-history-action="pin" data-pinned="${s.pinned}" aria-pressed="${s.pinned}" aria-label="${s.pinned?'取消置顶':'置顶'}：${escape(s.title)}">${s.pinned?'已置顶 · 取消':'置顶'}</button><button class="history-delete" data-history-action="delete" aria-label="删除：${escape(s.title)}">删除</button></div></div>`).join(''):'<div class="history-empty">每一节课，都值得留下。<br>你的课堂记录会出现在这里。</div>';
+}
+function blank(){if(materialBusy||languageBusy)return;showClassroom();current=null;selectedLanguage='auto';renderMaterials();partials.clear();$('transcript').innerHTML=initialEmpty;transcriptFollow.reset();$('title').value='';$('breadcrumb-title').textContent='新的开始';$('segment-count').textContent='0 段';$('summary').hidden=true;$('summary-empty').hidden=false;$('summary-badge').textContent='待生成';updateExportControls();$('retry-summary').hidden=true;$('timer').textContent='00:00:00';$('partial').hidden=true;$('save-state').textContent=storageDescription();elapsed=0;notice('');controls('idle');history().catch(e=>notice(e.message));}
+async function releaseAudio(){
+ stream?.getTracks().forEach(t=>t.stop());stream=null;micLabel='';micSource?.disconnect();micSource=null;
+ capture?.disconnect();muted?.disconnect();capture=null;muted=null;
+ if(context && context.state!=='closed')await context.close();context=null;
+ clearInterval(tick);await wakeLock?.release().catch(()=>{});wakeLock=null;
+ document.querySelectorAll('.meter i').forEach(i=>i.style.height='');
+}
+function send(value){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(value));}
+async function flush(){
+ if(!capture || context?.state!=='running')return;
+ await new Promise(resolve=>{const timer=setTimeout(()=>{flushResolver=null;resolve();},1500);flushResolver=()=>{clearTimeout(timer);resolve();};capture.port.postMessage('flush');});
+}
+async function acquireMicrophone(){
+ const next=await openLocalMicrophone();stream?.getTracks().forEach(t=>t.stop());stream=next;micLabel=stream.getAudioTracks()[0]?.label||'本机麦克风';
+ stream.getAudioTracks()[0].onended=async()=>{
+  if(mode==='recording')await pauseRecording();
+  if(['recording','paused','connecting'].includes(mode))notice('本机麦克风已断开，点击继续录音可重新连接。');
+ };
+}
+async function begin(){
+ if(translationModeBusy||accountBusy||materialBusy||languageBusy||majorBusy||['recording','connecting','finishing'].includes(mode))return;
+ if(!await requireLogin())return;
+ if(translationModeBusy||accountBusy||materialBusy||languageBusy||majorBusy||['recording','connecting','finishing'].includes(mode))return;
+ if(!config.hasKey){$('settings').showModal();return;}
+ notice('');lastEnded=false;controls('connecting');
+ try{
+   const check=await fetch('/api/openai/status',{signal:AbortSignal.timeout(15000)});
+   const availability=await check.json();
+   if(!check.ok)throw new Error(availability.error?.message||'无法检查翻译服务，请稍后重试。');
+   if(!availability.available)throw new Error(availability.message);
+   await acquireMicrophone();
+   context=new AudioContext({sampleRate:24000});await context.resume();
+   if(context.sampleRate!==24000)throw new Error('当前浏览器不支持所需的音频采样率，请使用 Chrome。');
+   await context.audioWorklet.addModule('/pcm-worklet.js');
+   capture=new AudioWorkletNode(context,'pcm-capture');muted=context.createGain();muted.gain.value=0;
+   micSource=context.createMediaStreamSource(stream);micSource.connect(capture);capture.connect(muted).connect(context.destination);
+   capture.port.onmessage=({data})=>{
+     if(data.flushed){flushResolver?.();flushResolver=null;return;}
+     if(data.audio && ws?.readyState===WebSocket.OPEN && mode==='recording'){
+       if(ws.bufferedAmount>512000){pauseRecording();notice('网络发送拥堵，已暂停录音。请检查连接后继续。');return;}
+       ws.send(data.audio);
+       const samples=new Int16Array(data.audio);let energy=0;for(const x of samples)energy+=(x/32768)**2;const level=Math.min(1,Math.sqrt(energy/samples.length)*8);
+       document.querySelectorAll('.meter i').forEach((bar,i)=>bar.style.height=(4+level*(10+Math.sin(i*2.1)*8))+'px');
+     }
+   };
+   if(!current)current=await api('/api/sessions',{method:'POST',body:JSON.stringify({sourceLanguage:selectedLanguage,title:$('title').value.trim()||'课堂 '+new Date().toLocaleDateString('zh-CN')})});
+   render();await history();
+   ws=new BrowserLive();
+   ws.onopen=()=>send({type:'start',id:current.id});
+   ws.onmessage=async({data})=>{
+     const e=JSON.parse(data);
+     if(e.type==='ready'){
+       if(!stream?.getAudioTracks().some(t=>t.readyState==='live')){send({type:'pause'});controls('paused');notice('本机麦克风已断开，点击继续录音可重新连接。');return;}
+       capture?.port.postMessage('resume');stream?.getAudioTracks().forEach(t=>t.enabled=true);controls('recording');startedAt=Date.now();clearInterval(tick);tick=setInterval(()=>{$('timer').textContent=time(elapsed+Date.now()-startedAt);},1000);
+       try{wakeLock=await navigator.wakeLock?.request('screen');}catch{}
+     }
+     if(e.type==='delta'){partials.set(e.id,(partials.get(e.id)||'')+e.delta);renderPartial();}
+     if(e.type==='session'){current=e.session;for(const s of current.segments)if(s.source){partials.delete(s.id);for(const part of s.sourceParts||[])partials.delete(part.id);}renderPartial();render();}
+     if(e.type==='translation'){const row=current?.segments.find(s=>s.id===e.id);if(row){row.translation=e.translation;const article=Array.from($('transcript').querySelectorAll('[data-segment-id]')).find(el=>el.dataset.segmentId===e.id);const p=article?.querySelector('.translation');if(p)transcriptFollow.mutate(()=>{p.hidden=false;p.textContent=e.translation;});else render();}}
+     if(e.type==='warning')notice(e.message);
+     if(e.type==='status'){$('status-detail').textContent=e.message;}
+     if(e.type==='paused'){$('status-detail').textContent='麦克风已暂停 · 字幕已保存';}
+     if(['disconnected','idle','fatal'].includes(e.type)){
+       if(mode==='recording'){elapsed+=Date.now()-startedAt;clearInterval(tick);}
+       stream?.getAudioTracks().forEach(t=>t.enabled=false);
+       if(e.type==='fatal'&&mode==='connecting'){closeFailedConnection(ws);ws=null;controls('idle');await releaseAudio();}
+       else {capture?.port.postMessage('flush');controls('paused');}
+       notice(e.message||'连接已断开。已保存收到的字幕，点击继续录音重连。');
+     }
+     if(e.type==='finished'){
+       lastEnded=true;current=e.session;await releaseAudio();partials.clear();renderPartial();controls('ended');render();
+       history().catch(()=>{});
+       if(current.summary)await summaryReady();
+     }
+   };
+   ws.onerror=()=>notice('连接失败，请检查网络后重试。');
+   ws.onclose=async()=>{
+     if(!lastEnded && ['recording','connecting','paused','finishing'].includes(mode)){
+       if(mode==='recording')elapsed+=Date.now()-startedAt;
+       await releaseAudio();controls('idle');notice('连接中断，已收到的字幕保留在本机。可继续这节课，或重新生成总结。');
+       try{current=await api('/api/sessions/'+current.id);render();}catch{}
+     }
+   };
+ }catch(e){await releaseAudio();controls('idle');notice(e.name==='NotAllowedError'?'未获得麦克风权限，请在浏览器地址栏中允许麦克风，然后重新开始。':e.message);}
+}
+function renderPartial(){const text=[...partials.values()].join(' ');$('partial').textContent=text?'正在识别 · '+text:'';$('partial').hidden=!text;}
+async function pauseRecording(){
+ if(mode==='recording'){
+   $('pause').disabled=true;await flush();$('pause').disabled=false;send({type:'pause'});elapsed+=Date.now()-startedAt;clearInterval(tick);stream?.getAudioTracks().forEach(t=>t.enabled=false);controls('paused');
+ }else if(mode==='paused'){
+   notice('');if(ws?.readyState===WebSocket.OPEN){
+    controls('connecting');try{if(!stream?.getAudioTracks().some(t=>t.readyState==='live')){await acquireMicrophone();micSource?.disconnect();micSource=context.createMediaStreamSource(stream);micSource.connect(capture);}send({type:'resume'});}catch(error){controls('paused');notice(error.message);}
+   }else await begin();
+ }
+}
+async function finish(){
+ if(!current)return;
+ $('finish').disabled=true;$('pause').disabled=true;if(mode==='recording'){await flush();elapsed+=Date.now()-startedAt;}$('pause').disabled=false;
+ controls('finishing');await releaseAudio();send({type:'finish'});
+}
+function updateExportControls(){
+ const empty=!current||(!current.segments.length&&!current.summary);
+ for(const id of ['export-md','export-html'])$(id).disabled=exportBusy||empty;
+ $('export-pdf').disabled=exportBusy||!current?.summary?.trim();
+ $('export-transcript-pdf').disabled=exportBusy||!current?.segments.some(s=>s.source?.trim()||s.translation?.trim()||s.error);
+ $('export-pdf').textContent=exportBusy?'正在准备文件…':'课堂总结 PDF';
+ $('export-transcript-pdf').textContent=exportBusy?'正在准备文件…':'中英文对照 PDF';
+}
+async function download(format){
+ if(!current||exportBusy)return;
+ exportBusy=true;updateExportControls();$('export-status').hidden=false;$('export-status').textContent=format.startsWith('pdf')?'正在生成 PDF…':'正在准备下载…';
+ try{await downloadNotes(structuredClone(current),format);$('export-status').textContent=format.startsWith('pdf')?'已发起 PDF 下载，可在下载文件夹中用 WPS 或预览打开。':'已发起下载，请查看浏览器的下载列表。';}
+ catch(error){$('export-status').textContent='下载失败：'+error.message+' 请重试，课堂记录已保留。';}
+ finally{exportBusy=false;updateExportControls();}
+}
+function materialLocked(){return translationModeBusy||accountBusy||majorBusy||materialBusy||languageBusy||['recording','paused','connecting','finishing'].includes(mode);}
+function updateMaterialControls(){
+ const locked=materialLocked();$('material-add').disabled=locked;$('try-open').disabled=locked||!!current?.demo;
+ $('start').disabled=locked&&mode!=='recording'&&mode!=='paused';
+ document.querySelectorAll('[data-material-action]').forEach(b=>b.disabled=locked);
+ $('material-drop').classList.toggle('locked',locked);
+}
+function renderMaterials(){
+ const materials=current?.materials||[];$('material-count').textContent=`${materials.length} 份`;
+ $('material-list').innerHTML=materials.map(m=>`<div class="material-item"><label><input type="checkbox" data-material-action="toggle" data-id="${m.id}" ${m.enabled!==false?'checked':''} aria-label="参考 ${escape(m.name)}"><span><strong>${escape(m.name)}</strong><small>${m.pageCount} 页/段 · ${m.characters.toLocaleString()} 字符${m.enabled===false?' · 已停用':''}</small></span></label><div><button data-material-action="preview" data-id="${m.id}">预览</button><button data-material-action="remove" data-id="${m.id}" aria-label="移除 ${escape(m.name)}">移除</button></div>${m.warnings?.length?`<p>${escape(m.warnings.join(' '))}</p>`:''}</div>`).join('');
+ updateMaterialControls();
+}
+async function ensureClass(){
+ if(!current){current=await api('/api/sessions',{method:'POST',body:JSON.stringify({sourceLanguage:selectedLanguage,title:$('title').value.trim()||'课堂 '+new Date().toLocaleDateString('zh-CN')})});render();await history();}
+ return current;
+}
+async function uploadMaterials(files){
+ if(materialLocked()||!files.length)return;
+ if(current?.demo){notice('演示课堂使用固定内容，请新建课堂后导入自己的资料。');return;}
+ if(!await requireLogin())return;
+ if(materialLocked())return;
+ materialBusy=true;controls(mode);const errors=[];
+ try{
+   await ensureClass();
+   for(let i=0;i<files.length;i++){
+     const file=files[i];$('material-progress').hidden=false;$('material-progress').textContent=`正在导入 ${i+1}/${files.length}：${file.name}…`;
+     try{if(file.size>20*1024*1024)throw new Error('文件超过 20 MB');current=await api(`/api/sessions/${current.id}/materials`,{method:'POST',headers:{'Content-Type':'application/octet-stream','X-File-Name':encodeURIComponent(file.name)},body:file});render();}catch(e){errors.push(`${file.name}：${e.message}`);}
+   }
+   await history();notice(errors.length?errors.join('；'):'资料已导入。可预览识别到的内容，或点击“试译与总结”检查效果。');
+ }catch(e){notice(e.message);}finally{materialBusy=false;$('material-progress').hidden=true;$('material-files').value='';controls(mode);renderMaterials();}
+}
+$('material-add').onclick=async()=>{if(materialLocked())return;if(!profileUser){await requireLogin();return;}$('material-files').click();};
+$('material-files').onchange=e=>uploadMaterials([...e.target.files]);
+$('material-drop').ondragover=e=>{e.preventDefault();if(!materialLocked())$('material-drop').classList.add('dragging');};
+$('material-drop').ondragleave=()=>$('material-drop').classList.remove('dragging');
+$('material-drop').ondrop=e=>{e.preventDefault();$('material-drop').classList.remove('dragging');uploadMaterials([...e.dataTransfer.files]);};
+$('material-list').onclick=async e=>{
+ const button=e.target.closest('[data-material-action]');if(!button||materialLocked())return;
+ const action=button.dataset.materialAction,id=button.dataset.id;
+ if(action==='preview'){
+   try{const m=await api(`/api/sessions/${current.id}/materials/${id}`);$('preview-title').textContent=m.name;$('preview-warning').textContent=m.warnings.join(' ');$('preview-content').innerHTML=m.pages.map(p=>`<section><h3>${escape(p.label)}</h3><pre>${escape(p.text||'此页没有可提取的文字')}</pre></section>`).join('');$('material-preview').showModal();}catch(e){notice(e.message);}return;
+ }
+ materialBusy=true;controls(mode);
+ try{current=await api(`/api/sessions/${current.id}/materials/${id}`,action==='remove'?{method:'DELETE'}:{method:'PATCH',body:JSON.stringify({enabled:button.checked})});render();notice(current.summaryStale?'资料已更新，请重新生成总结以应用新资料。':'参考资料已更新。');}catch(e){notice(e.message);}finally{materialBusy=false;controls(mode);renderMaterials();}
+};
+$('preview-close').onclick=()=>$('material-preview').close();
+function showTrial(result){
+ $('trial-result').hidden=!result;if(!result)return;
+ $('trial-translation').textContent=result.translation;$('trial-references').textContent=result.references?.length?'检索到的参考段落：'+result.references.map(r=>r.name+' · '+r.label).join('；'):'未使用参考资料';$('trial-summary').innerHTML=renderNotes(result.summary);
+}
+$('try-open').onclick=()=>{
+ $('trial-status').hidden=true;$('trial-input').value=current?.lastTrial?.source||'';showTrial(current?.lastTrial);
+ const names=(current?.materials||[]).filter(m=>m.enabled!==false).map(m=>m.name);$('trial-context').textContent=names.length?'参考：'+names.join('、'):'当前未导入参考资料';$('trial-dialog').showModal();
+};
+$('trial-close').onclick=()=>{if(!materialBusy)$('trial-dialog').close();};
+$('trial-dialog').addEventListener('cancel',e=>{if(materialBusy)e.preventDefault();});
+$('trial-run').onclick=async()=>{
+ if(materialBusy)return;
+ const text=$('trial-input').value.trim();if(!text){$('trial-status').hidden=false;$('trial-status').textContent='先输入一段课堂原文。';return;}
+ if(!config.hasKey){$('trial-dialog').close();$('settings').showModal();return;}
+ materialBusy=true;controls(mode);$('trial-run').disabled=true;$('trial-close').disabled=true;$('trial-input').disabled=true;$('trial-status').hidden=false;$('trial-status').textContent='正在参考资料生成译文与总结…';showTrial(null);
+ try{await ensureClass();const result=await api(`/api/sessions/${current.id}/try`,{method:'POST',body:JSON.stringify({text})});current.lastTrial=result;showTrial(result);$('trial-status').textContent='试译完成，结果已保存在这节课中。测试内容未加入课堂字幕。';}catch(e){$('trial-status').textContent=e.message;}finally{materialBusy=false;controls(mode);$('trial-run').disabled=false;$('trial-close').disabled=false;$('trial-input').disabled=false;}
+};
+const initialEmpty=$('transcript').innerHTML;
+$('new-class').onclick=()=>{if(!materialLocked())blank();};$('start').onclick=begin;$('pause').onclick=pauseRecording;$('finish').onclick=finish;
+let accessBusy=false;
+function renderAccess(){
+ $('setup-hint').hidden=config.hasKey;$('member-use').hidden=!config.member;$('settings-account').hidden=!!profileUser;
+ $('member-status').textContent=config.member?(config.sharedReady?'会员已验证，可以使用共享服务。':'会员已验证；管理员尚未配置共享 API，暂时不能开始翻译。'):'';
+ $('settings-open').textContent=config.accessMode==='member'?(config.sharedReady?'✓ 会员已启用':'会员已验证 · 待开通'):'⚙ 会员服务';
+}
+async function openSettings(){if(materialLocked()){notice('请先完成当前操作或结束课堂，再打开会员服务。');return;}if(!await requireLogin())return;$('settings-error').textContent='';renderAccess();$('settings').showModal();}
+$('mobile-settings').onclick=$('settings-open').onclick=openSettings;
+$('setup-open').onclick=openSettings;
+$('settings-close').onclick=()=>{if(accessBusy)return;$('member-code').value='';$('settings').close();};
+$('settings').addEventListener('cancel',e=>{if(accessBusy)e.preventDefault();});
+function lockAccess(value){accessBusy=value;for(const id of ['connection-save','member-use','settings-close'])$(id).disabled=value;}
+$('settings-form').onsubmit=async e=>{e.preventDefault();if(accessBusy||materialLocked())return;lockAccess(true);$('settings-error').textContent='';
+ try{config=await login($('member-code').value);$('member-code').value='';await loadAccount();renderAccess();
+ if(config.hasKey){$('settings').close();notice('会员已启用，可以使用翻译和总结服务。');}}
+ catch(e){$('settings-error').textContent=e.message;}finally{lockAccess(false);}
+};
+$('member-use').onclick=async()=>{if(accessBusy||materialLocked())return;lockAccess(true);try{config=await useMembership();renderAccess();if(config.hasKey)$('settings').close();}catch(e){$('settings-error').textContent=e.message;}finally{lockAccess(false);}};
+$('settings-account').onclick=()=>{if(accessBusy)return;$('settings').close();showProfile();};
+$('demo').onclick=async()=>{try{current=await api('/api/sessions',{method:'POST',body:JSON.stringify({demo:true})});selectedLanguage='en';controls('ended');render();$('start').hidden=true;notice('这是演示课堂：使用示例字幕与笔记，不采集麦克风，不调用 API。');await history();}catch(e){notice(e.message);}};
+async function openHistory(id){if(!id)return;if(translationModeBusy||accountBusy||materialBusy||languageBusy||['recording','paused','connecting','finishing'].includes(mode)){notice('请先完成当前操作或结束课堂，再打开其他记录。');return;}try{showClassroom();current=await api('/api/sessions/'+id);selectedLanguage=language(current.sourceLanguage).code;$('transcript').innerHTML=initialEmpty;transcriptFollow.reset();controls(current.status==='ready'?'idle':'ended');elapsed=0;notice('');render();if(current.demo)$('start').hidden=true;await history();}catch(e){notice(e.message);}};
+let historyActionBusy=false;
+function confirmCourseDelete(title){const dialog=$('course-delete-dialog');$('course-delete-name').textContent=title;dialog.returnValue='cancel';return new Promise(resolve=>{dialog.addEventListener('close',()=>resolve(dialog.returnValue==='delete'),{once:true});dialog.showModal();});}
+$('history').onclick=async e=>{
+ const button=e.target.closest('[data-history-action]'),row=button?.closest('[data-id]');if(!row||historyActionBusy)return;
+ const id=row.dataset.id,action=button.dataset.historyAction;
+ if(action==='open'){await openHistory(id);return;}
+ if(action==='delete'&&(materialBusy||languageBusy||(current?.id===id&&['recording','paused','connecting','finishing'].includes(mode)))){notice('请先完成当前操作或结束课堂，再删除。');return;}
+ if(action==='delete'&&!await confirmCourseDelete(row.querySelector('strong').textContent))return;
+ historyActionBusy=true;button.disabled=true;
+ try{
+  if(action==='pin')await setSessionPinned(id,button.dataset.pinned!=='true');
+  else{await api('/api/sessions/'+id,{method:'DELETE'});if(current?.id===id)blank();}
+  await history();
+ }catch(error){notice(error.message);}finally{historyActionBusy=false;button.disabled=false;}
+};
+$('history-select').onchange=e=>openHistory(e.target.value);
+$('retry-summary').onclick=async()=>{if(!current)return;if(!config.hasKey&&(!current.demo||current.materials?.length)){$('settings').showModal();return;}controls('finishing');notice('正在整理课堂笔记…');try{current=await api(`/api/sessions/${current.id}/summary`,{method:'POST'});controls('ended');render();if(current.demo)$('start').hidden=true;await summaryReady();}catch(e){controls('ended');render();notice(e.message);}};
+$('export-pdf').onclick=()=>download('pdf-summary');$('export-transcript-pdf').onclick=()=>download('pdf-transcript');$('export-md').onclick=()=>download('md');$('export-html').onclick=()=>download('html');
+window.addEventListener('beforeunload',e=>{if(translationModeBusy||accountBusy||materialBusy||languageBusy||['recording','paused','connecting','finishing'].includes(mode)){e.preventDefault();e.returnValue='';}});
+document.addEventListener('visibilitychange',async()=>{if(document.visibilityState==='visible'&&mode==='recording')try{wakeLock=await navigator.wakeLock?.request('screen');}catch{}});
+async function loadTranslationModePreference(){
+ $('translation-mode-options').disabled=true;$('translation-mode-save').disabled=true;
+ try{preferredTranslationMode=await getTranslationModePreference();document.querySelectorAll('input[name="translationMode"]').forEach(input=>input.checked=input.value===preferredTranslationMode);updateTranslationModeLabel();$('translation-mode-status').hidden=true;$('translation-mode-options').disabled=false;$('translation-mode-save').disabled=false;}
+ catch(error){$('translation-mode-status').hidden=false;$('translation-mode-status').textContent='无法读取翻译模式：'+error.message;}
+}
+$('translation-mode-form').onsubmit=async event=>{
+ event.preventDefault();if(materialLocked())return;translationModeBusy=true;$('translation-mode-options').disabled=true;$('translation-mode-save').disabled=true;
+ try{preferredTranslationMode=await saveTranslationModePreference(document.querySelector('input[name="translationMode"]:checked')?.value);updateTranslationModeLabel();$('translation-mode-status').textContent='已保存：'+translationMode(preferredTranslationMode).label+'。下次开始或继续课堂时生效。';}
+ catch(error){$('translation-mode-status').textContent='保存失败：'+error.message;}
+ finally{translationModeBusy=false;$('translation-mode-options').disabled=false;$('translation-mode-save').disabled=false;$('translation-mode-status').hidden=false;}
+};
+$('profile-major').innerHTML=MAJORS.map(m=>`<option value="${m.code}">${escape(m.label)}</option>`).join('');
+function updateMajorField(){const custom=$('profile-major').value==='custom';$('custom-major-field').hidden=!custom;$('custom-major').required=custom;}
+$('profile-major').onchange=()=>{updateMajorField();$('major-status').hidden=true;};
+async function loadMajorPreference(){
+ await loadTranslationModePreference();
+ try{const major=await getMajorPreference();$('profile-major').value=major.code;$('custom-major').value=major.custom;updateMajorField();$('profile-major').disabled=false;$('major-save').disabled=false;}
+ catch(error){$('major-status').hidden=false;$('major-status').textContent='无法读取专业设置：'+error.message;}
+}
+$('major-form').onsubmit=async event=>{
+ event.preventDefault();if(materialLocked())return;majorBusy=true;$('major-save').disabled=true;$('profile-major').disabled=true;$('custom-major').disabled=true;
+ try{const major=await saveMajorPreference({code:$('profile-major').value,custom:$('custom-major').value});$('major-status').textContent='已保存：'+majorName(major)+'。之后的翻译和总结会使用此设置。';}
+ catch(error){$('major-status').textContent='保存失败：'+error.message;}
+ finally{majorBusy=false;$('major-save').disabled=false;$('profile-major').disabled=false;$('custom-major').disabled=false;$('major-status').hidden=false;}
+};
+function applyAccount(user){
+ if(profileUser?.id!==user?.id){$('history').textContent='';$('history-count').textContent='0';$('history-select').innerHTML='<option value="">历史课堂</option>';renderProfileHistory([]);historyWarning='';profileMessage('');$('redeem-status').hidden=true;}
+ profileUser=user;setAccount(user);
+}
+function profileMessage(text){$('profile-error').textContent=text;$('profile-error').hidden=!text;}
+function renderProfileAccount(){
+ $('profile-login').hidden=!!profileUser;$('profile-signed-in').hidden=!profileUser;$('profile-login-title').textContent=profileUser?'我的账户':'未登录';
+ $('profile-account-label').textContent=profileUser?.label||'';
+ renderMembership();updatePhoneControls();window.dispatchEvent(new CustomEvent('account-render',{detail:profileUser}));
+ $('profile-history-scope').textContent=profileUser?'当前账户的记录':'当前浏览器的记录';$('sidebar-save-label').textContent=profileUser?'先存本机，定时同步到账户':'记录保存在当前浏览器';
+ renderProfilePage();
+}
+function renderProfileHistory(list){
+ $('profile-history-count').textContent=list.length+' 节';
+ $('profile-history-list').innerHTML=list.length?list.map(s=>`<button class="profile-history-item" data-history-id="${s.id}"><strong>${escape(s.title)}</strong><small>${escape(new Date(s.createdAt).toLocaleDateString('zh-CN'))} · ${s.count} 段${s.demo?' · 示例':''}</small></button>`).join(''):'<div class="profile-history-empty">还没有课堂记录</div>';
+}
+async function loadAccount(){
+ try{const response=await fetch('/api/account',{credentials:'same-origin'});if(!response.ok)throw new Error('暂时无法读取账户状态，请稍后刷新重试。');const data=await response.json();applyAccount(data.user);phoneEnabled=data.methods?.phone===true;passwordEnabled=data.methods?.password===true;renderProfileAccount();}
+ catch(e){profileMessage(e.message);renderProfileAccount();}
+}
+function showClassroom(){
+ if(translationModeBusy||majorBusy||accountBusy)return;
+ $('profile-page').hidden=true;$('classroom-workspace').hidden=false;$('demo').hidden=false;$('profile-open').removeAttribute('aria-current');
+ document.title='满绩速翻 · 实时翻译与课堂笔记';
+ $('breadcrumb-title').textContent=current?.title||'新的开始';if(profileRoute(location.pathname))window.history.pushState({},'', '/');
+}
+function renderProfilePage(){
+ const page=PROFILE_PAGES[profileView];
+ document.querySelectorAll('[data-profile-view]').forEach(element=>element.hidden=element.dataset.profileView!==profileView);
+ const protectedPage=['security','data'].includes(profileView),needsLogin=protectedPage&&!profileUser;
+ $('profile-auth-required').hidden=!needsLogin||!$('deletion-progress').hidden;
+ $('profile-auth-login').href='/profile?login=1&next='+profileView;
+ $('profile-title').textContent=page.title;$('profile-subtitle').textContent=profileView==='overview'&&!profileUser?'登录后，课堂历史保存到你的账户。':page.subtitle;
+ $('profile-back').textContent=profileView==='overview'?'返回课堂':'← 返回个人中心';
+ document.querySelectorAll('[data-profile-link]').forEach(link=>{if(profileRoute(new URL(link.href,location.href).pathname)===profileView)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');});
+ $('profile-subnav').hidden=profileView==='overview';
+ if(!$('profile-page').hidden){$('breadcrumb-title').textContent=profileView==='overview'?'个人中心':'个人中心 / '+page.title;document.title=page.title+' · 满绩速翻';}
+}
+function showProfile(view='overview',push=true){
+ if(materialLocked()){notice('请先完成当前操作，再打开个人中心。');return;}
+ profileView=Object.hasOwn(PROFILE_PAGES,view)?view:'overview';
+ $('profile-page').hidden=false;$('classroom-workspace').hidden=true;$('demo').hidden=true;$('profile-open').setAttribute('aria-current','page');
+ if(push&&(location.pathname!==profilePath(profileView)||location.search))window.history.pushState({},'',profilePath(profileView));
+ renderProfilePage();
+ if(profileView==='preferences')loadTranslationModePreference();
+ history().catch(e=>profileMessage(e.message));
+ window.scrollTo({top:0,behavior:'instant'});
+ $('profile-title').focus({preventScroll:true});
+}
+let loginCheckBusy=false;
+async function requireLogin(){
+ if(loginCheckBusy)return false;loginCheckBusy=true;
+ try{
+  const response=await fetch('/api/account',{credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(10000)});
+  if(response.status===401){rememberClassroom(accountId(),current?.id);window.location.assign('/profile?login=1');return false;}
+  if(!response.ok)throw new Error('暂时无法确认登录状态，请稍后重试。');
+  const data=await response.json();
+  if(!data.user||profileUser?.id!==data.user.id){rememberClassroom(accountId(),current?.id);window.location.assign('/profile?login=1');return false;}
+  applyAccount(data.user);config=await refreshAccess();renderAccess();renderProfileAccount();return true;
+ }catch(error){notice(error.name==='TimeoutError'?'登录检查超时，请检查网络后重试。':error.message);return false;}
+ finally{loginCheckBusy=false;}
+}
+$('profile-open').onclick=$('mobile-profile').onclick=e=>{e.preventDefault();showProfile();};$('profile-back').onclick=()=>profileView==='overview'?showClassroom():showProfile();
+$('profile-page').addEventListener('click',event=>{const link=event.target.closest('[data-profile-link]');if(!link||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey)return;event.preventDefault();showProfile(profileRoute(new URL(link.href,location.href).pathname));});
+$('profile-history-list').onclick=e=>{const id=e.target.closest('[data-history-id]')?.dataset.historyId;if(id)openHistory(id);};
+function selectLoginTab(){}
+$('account-logout').onclick=async()=>{if(materialLocked())return;let signedOut=false;accountBusy=true;$('account-logout').disabled=true;try{const res=await fetch('/api/account/logout',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:'{}'});if(!res.ok)throw new Error('退出失败，请稍后重试。');applyAccount(null);config=await refreshAccess();renderAccess();await loadMajorPreference();historyWarning='';blank();renderProfileAccount();await history();signedOut=true;}catch(e){profileMessage(e.message);}finally{accountBusy=false;$('account-logout').disabled=false;updatePhoneControls();}if(signedOut)showProfile();};
+function renderMembership(){
+ $('profile-membership').hidden=!profileUser;
+ const m=profileUser?.membership;
+ $('membership-tier').textContent=({none:'非会员',regular:'普通会员',premium:'金会员'})[m?.tier]||'非会员';
+ $('membership-expiry').textContent=m?.active?'有效期至 '+new Date(m.expiresAt).toLocaleString('zh-CN'):m?.expired?'会员已于 '+new Date(m.expiresAt).toLocaleString('zh-CN')+' 到期。':'尚未开通会员。';
+ $('membership-service').textContent=m?.active?(config?.sharedReady?'可使用会员翻译和总结服务。':'共享 API 尚未配置，暂时无法使用会员翻译服务。'):'输入会员码，兑换对应的会员权益。';
+}
+function updatePhoneControls(){updatePasswordControls();}
+async function accountApi(path,body){const response=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error?.message||'账户服务暂不可用');return data;}
+function updatePasswordControls(){for(const id of ['login-username','login-password','password-confirm','password-submit','password-switch'])$(id).disabled=!passwordEnabled||accountBusy;}
+$('password-switch').onclick=()=>{
+ if(accountBusy)return;passwordRegister=!passwordRegister;$('password-confirm-field').hidden=!passwordRegister;$('password-confirm').required=passwordRegister;$('password-confirm').value='';$('login-password').value='';$('login-password').autocomplete=passwordRegister?'new-password':'current-password';$('password-submit').textContent=passwordRegister?'注册并登录':'登录';$('password-switch').textContent=passwordRegister?'已有账号？去登录':'没有账号？注册账号';profileMessage('');
+};
+$('password-form').onsubmit=async event=>{
+ event.preventDefault();if(materialLocked()||!passwordEnabled)return;
+ if(passwordRegister&&$('login-password').value!==$('password-confirm').value){profileMessage('两次输入的密码不一致。');return;}
+ const destination=profileLoginDestination(location.search);let signedIn=false;accountBusy=true;updatePasswordControls();profileMessage(passwordRegister?'正在注册…':'正在登录…');
+ try{const data=await accountApi('/api/account/'+(passwordRegister?'register':'login')+'/password',{username:$('login-username').value,password:$('login-password').value});$('login-password').value='';$('password-confirm').value='';applyAccount(data.user);config=await refreshAccess();renderAccess();await loadMajorPreference();historyWarning='';blank();renderProfileAccount();await history();profileMessage(passwordRegister?'注册成功，已登录。':'已登录。');signedIn=true;}
+ catch(error){profileMessage(error.message);}finally{accountBusy=false;updatePhoneControls();controls(mode);}
+ if(signedIn&&!await reopenPendingClassroom()){
+  if(['membership','orders'].includes(destination))window.location.assign(destination==='membership'?'/membership':'/membership/orders');else showProfile(destination);
+ }
+};
+$('redeem-form').onsubmit=async event=>{
+ event.preventDefault();if(materialLocked()||!profileUser)return;accountBusy=true;$('redeem-submit').disabled=true;$('redeem-status').hidden=false;$('redeem-status').textContent='正在兑换…';
+ try{config=await login($('profile-member-code').value);$('profile-member-code').value='';await loadAccount();renderAccess();renderMembership();$('redeem-status').textContent=config.sharedReady?'会员已开通，可以开始翻译和总结。':'会员已开通。共享 API 尚未配置，请等待管理员接入。';}
+ catch(error){$('redeem-status').textContent=error.message;}finally{accountBusy=false;$('redeem-submit').disabled=false;}
+};
+window.addEventListener('popstate',()=>{const view=profileRoute(location.pathname,location.search);if(view)showProfile(view,false);else showClassroom();});
+window.addEventListener('history-save-warning',e=>{historyWarning=e.detail;profileMessage(e.detail);if(current)render();notice(e.detail);});
+initAccountSecurity({locked:materialLocked,showMessage:profileMessage,setBusy:value=>{accountBusy=value;updatePasswordControls();}});
+await loadAccount();
+await loadMajorPreference();
+try{config=await refreshAccess();renderAccess();renderMembership();$('setup-hint').hidden=config.hasKey;$('model-info').textContent=`转写模式：在个人中心切换　翻译 / 总结：${config.textModel}`;await history();renderMaterials();}catch(e){notice('无法打开浏览器存储：'+e.message);$('start').disabled=true;}
+
+if(profileRoute(location.pathname)){
+ showProfile(profileRoute(location.pathname,location.search),false);
+ if(new URLSearchParams(location.search).has('login')&&!profileUser){selectLoginTab('password');profileMessage(new URLSearchParams(location.search).has('passwordChanged')?'密码已修改，所有旧登录已失效，请重新登录。':'请先登录，再继续使用。');$('profile-login-title').scrollIntoView({block:'start'});$('login-username').focus({preventScroll:true});}
+}
+
+async function reopenPendingClassroom(){
+ if(!profileUser)return;
+ try{const restored=await restoreClassroom(profileUser.id,id=>api('/api/sessions/'+id));if(!restored)return false;current=restored;showClassroom();selectedLanguage=language(current.sourceLanguage).code;controls(current.status==='ready'?'idle':'ended');render();await history();notice('已恢复登录前的课堂和参考资料。');return true;}
+ catch(error){profileMessage('原课堂仍保留在历史记录中，暂时无法恢复：'+error.message);}
+}
+await reopenPendingClassroom();
+
+window.addEventListener('history-sync',e=>{const {owner,id,pending}=e.detail;if(owner!==accountId())return;pending?pendingSync.add(id):pendingSync.delete(id);if(current?.id===id){if(!pending)historyWarning='';$('save-state').textContent=pending?'已保存在此设备 · 等待账户同步':'已保存到账户';}});
