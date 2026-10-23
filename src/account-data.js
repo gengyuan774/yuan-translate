@@ -12,6 +12,14 @@ export async function exportAccount(request,env,data){
  await (await auditStatement(env,user.id,'account','personal_data_export_requested')).run();
  async function* lines(){
   yield {type:'account',formatVersion:1,exportedAt:new Date().toISOString(),account,membership,recoveryEmail:email,redemptions:redemptions.results};
+  const usage=(await env.DB.prepare('SELECT period,kind,state,audio_ms,input_tokens,output_tokens,created_at FROM service_requests WHERE account_id=? ORDER BY created_at').bind(user.id).all()).results;
+  for(const record of usage)yield {type:'service_usage',data:record};
+  const trial=await env.DB.prepare('SELECT granted_at FROM account_trials WHERE account_id=?').bind(user.id).first();
+  yield {type:'trial',data:trial};
+  const balances=(await env.DB.prepare('SELECT scope,start,audio_used,audio_reserved,summaries_used,summaries_reserved FROM plan_balances WHERE account_id=?').bind(user.id).all()).results;
+  for(const balance of balances)yield {type:'plan_usage',data:balance};
+  const summaries=(await env.DB.prepare("SELECT created_at,state,result FROM service_summary_jobs WHERE account_id=? AND state='completed'").bind(user.id).all()).results;
+  for(const summary of summaries)yield {type:'saved_summary',data:summary};
   for(const [table,type] of [['account_classes','classroom'],['account_materials','material']]){
    let cursor='';
    while(true){
@@ -64,7 +72,7 @@ export async function resumeDeletion(request,env,data,admin=false){
  if(objects.objects.length)return {status:'pending',retryAfter:1};
  const id=row.account_id,subject=await digest('audit:'+id),statements=[];
  statements.push(env.DB.prepare("INSERT INTO security_audit (id,subject,actor,action,details,created_at) SELECT ?,?,?,'deletion_completed','{}',? FROM deletion_jobs WHERE id=? AND status='pending'").bind(crypto.randomUUID(),subject,admin?'admin':'account',Date.now(),row.id));
- for(const table of ['account_materials','account_classes','account_sessions','account_passwords','account_memberships','member_redemptions','membership_admin_audit','recovery_emails','recovery_challenges','account_security'])statements.push(env.DB.prepare(`DELETE FROM ${table} WHERE account_id=?`).bind(id));
+ for(const table of ['service_summary_jobs','plan_balances','account_trials','service_periods','service_accounts','account_materials','account_classes','account_sessions','account_passwords','account_memberships','member_redemptions','membership_admin_audit','recovery_emails','recovery_challenges','account_security'])statements.push(env.DB.prepare(`DELETE FROM ${table} WHERE account_id=?`).bind(id));
  statements.push(env.DB.prepare("UPDATE security_audit SET details='{}' WHERE subject=?").bind(subject));
  statements.push(env.DB.prepare('DELETE FROM accounts WHERE id=?').bind(id));
  statements.push(env.DB.prepare("UPDATE deletion_jobs SET account_id=NULL,status='completed',completed_at=? WHERE id=?").bind(Date.now(),row.id));

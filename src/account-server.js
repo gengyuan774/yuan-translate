@@ -15,8 +15,13 @@ export async function signOutAccount(request,env){const value=token(request);if(
 // Phone login invokes this only after SMS provider approval.
 export async function createVerifiedAccountSession(env,{provider,subject,label}){
  if(!['phone','email','wechat'].includes(provider)||typeof subject!=='string'||!subject||subject.length>512)throw new MemberError('登录身份无效。',400);
- const subjectHash=await hash(provider+':'+subject);const id=crypto.randomUUID();
- await database(env).prepare('INSERT INTO accounts (id, provider, subject_hash, label, created_at, phone_e164) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(provider, subject_hash) DO NOTHING').bind(id,provider,subjectHash,String(label||'已登录用户').slice(0,120),Date.now(),provider==='phone'?subject:null).run();
+ const subjectHash=await hash(provider+':'+subject),id=crypto.randomUUID(),now=Date.now();
+ // Match the freshly generated account id so an existing identity never gets
+ // a new trial on login. D1 commits registration and its one-time grant together.
+ await database(env).batch([
+  database(env).prepare('INSERT INTO accounts (id, provider, subject_hash, label, created_at, phone_e164) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(provider, subject_hash) DO NOTHING').bind(id,provider,subjectHash,String(label||'已登录用户').slice(0,120),now,provider==='phone'?subject:null),
+  database(env).prepare('INSERT INTO account_trials (account_id, granted_at) SELECT id, ? FROM accounts WHERE id = ? ON CONFLICT(account_id) DO NOTHING').bind(now,id)
+ ]);
  const user=await database(env).prepare('SELECT id, provider, label FROM accounts WHERE provider = ? AND subject_hash = ?').bind(provider,subjectHash).first();
  return issueAccountSession(env,user);
 }

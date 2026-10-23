@@ -2,6 +2,7 @@ import {MemberError} from './errors.js';
 export {MemberError} from './errors.js';
 import {accountUser,requireAccount} from './account-server.js';
 import {combinedMembership} from './payment-rules.js';
+import {trialFor} from './trial.js';
 const WEEK=7*86400;
 // End of 2099 in Beijing time; the expiry is fixed, not extended on redemption.
 const LONG_EXPIRY=Date.parse('2099-12-31T23:59:59.999+08:00');
@@ -15,13 +16,25 @@ const hash=async value=>hex(await crypto.subtle.digest('SHA-256',encode.encode(v
 function sameDigest(aa,bb){let diff=aa.length^bb.length;for(let i=0;i<aa.length;i++)diff|=aa.charCodeAt(i)^bb.charCodeAt(i);return diff===0;}
 async function matches(a,b){return sameDigest(await hash(a),await hash(b));}
 export async function membershipFor(env,accountId){
- const row=await db(env).prepare('SELECT tier, expires_at FROM account_memberships WHERE account_id = ?').bind(accountId).first();
+ const row=await db(env).prepare('SELECT tier, expires_at, updated_at, quota_anchor FROM account_memberships WHERE account_id = ?').bind(accountId).first();
  const orders=(await db(env).prepare("SELECT tier,state,review_reason,grant_start,grant_end FROM payment_orders WHERE account_id=? AND state='paid'").bind(accountId).all()).results;
- return combinedMembership(row,orders);
+ const now=Date.now(),membership=combinedMembership(row,orders,now);
+ if(!membership.active)return membership;
+ const intervals=orders.filter(o=>o.state==='paid'&&o.review_reason===null&&['regular','premium'].includes(o.tier)&&o.grant_end>o.grant_start).map(o=>({start:o.grant_start,end:o.grant_end}));
+ if(row&&['regular','premium'].includes(row.tier)&&row.expires_at){
+  const start=Number.isSafeInteger(row.quota_anchor)?row.quota_anchor:row.updated_at;
+  if(Number.isSafeInteger(start))intervals.push({start,end:row.expires_at});
+ }
+ let start=Math.min(...intervals.filter(i=>i.start<=now&&i.end>now).map(i=>i.start)),previous;
+ // Renewal orders can extend the end without moving the start of the current
+ // continuous paid membership. Tier changes use separate balances with the
+ // same period start, preventing a downgrade from refilling ordinary quotas.
+ do{previous=start;for(const i of intervals)if(i.start<start&&i.end>=start)start=i.start;}while(start!==previous);
+ return {...membership,periodAnchor:Number.isSafeInteger(start)?start:now};
 }
 export async function memberSession(request,env){
  const user=await accountUser(request,env);if(!user)return null;
- const membership=await membershipFor(env,user.id);return membership.active?{...membership,accountId:user.id}:null;
+ const membership=await membershipFor(env,user.id);return membership.active?{...membership,accountId:user.id}:trialFor(env,user.id);
 }
 // SQLite performs the limit check and increment atomically, including across Worker instances.
 export async function consume(env,id,limit,periodSeconds,amount=1,message){
@@ -39,9 +52,9 @@ export async function loginMember(request,env,code){
  // Persist the first expiry; retries and concurrent redemption never extend it.
  await db(env).batch([
   db(env).prepare('INSERT INTO member_redemptions (account_id, code_version, redeemed_at, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, code_version) DO NOTHING').bind(user.id,version,now,now+WEEK*1000),
-  db(env).prepare(`INSERT INTO account_memberships (account_id, tier, expires_at, updated_at)
-   SELECT account_id, 'regular', expires_at, ? FROM member_redemptions WHERE account_id = ? AND code_version = ? AND expires_at > ?
-   ON CONFLICT(account_id) DO UPDATE SET tier = 'regular', expires_at = excluded.expires_at, updated_at = excluded.updated_at
+  db(env).prepare(`INSERT INTO account_memberships (account_id, tier, expires_at, updated_at, quota_anchor)
+   SELECT account_id, 'regular', expires_at, ?, redeemed_at FROM member_redemptions WHERE account_id = ? AND code_version = ? AND expires_at > ?
+   ON CONFLICT(account_id) DO UPDATE SET quota_anchor = CASE WHEN account_memberships.tier IN ('regular','premium') AND account_memberships.expires_at > excluded.updated_at THEN COALESCE(account_memberships.quota_anchor,account_memberships.updated_at) ELSE excluded.quota_anchor END, tier = 'regular', expires_at = excluded.expires_at, updated_at = excluded.updated_at
    WHERE (account_memberships.tier != 'premium' OR account_memberships.expires_at <= ?) AND (account_memberships.expires_at IS NULL OR account_memberships.expires_at < excluded.expires_at)`).bind(now,user.id,version,now,now)
  ]);
  const membership=await membershipFor(env,user.id);
@@ -59,19 +72,20 @@ async function redeemLongMembership(env,user){
    SELECT ?,?,'account','long_membership_redeemed',json_object('tier','premium','expiresAt',?,'previousTier',m.tier,'previousExpiresAt',m.expires_at),?
    FROM accounts a LEFT JOIN account_memberships m ON m.account_id=a.id
    WHERE a.id=? AND NOT EXISTS (SELECT 1 FROM member_redemptions WHERE account_id=? AND code_version=?)`).bind(auditId,await hash('audit:'+user.id),LONG_EXPIRY,now,user.id,user.id,version),
-  db(env).prepare(`INSERT INTO account_memberships (account_id,tier,expires_at,updated_at)
-   SELECT id,'premium',?,? FROM accounts WHERE id=? AND NOT EXISTS (SELECT 1 FROM member_redemptions WHERE account_id=? AND code_version=?)
-   ON CONFLICT(account_id) DO UPDATE SET tier='premium',expires_at=MAX(COALESCE(account_memberships.expires_at,0),excluded.expires_at),updated_at=MAX(account_memberships.updated_at+1,excluded.updated_at)`).bind(LONG_EXPIRY,now,user.id,user.id,version),
+  db(env).prepare(`INSERT INTO account_memberships (account_id,tier,expires_at,updated_at,quota_anchor)
+   SELECT id,'premium',?,?,? FROM accounts WHERE id=? AND NOT EXISTS (SELECT 1 FROM member_redemptions WHERE account_id=? AND code_version=?)
+   ON CONFLICT(account_id) DO UPDATE SET quota_anchor=CASE WHEN account_memberships.tier IN ('regular','premium') AND account_memberships.expires_at > excluded.updated_at THEN COALESCE(account_memberships.quota_anchor,account_memberships.updated_at) ELSE excluded.quota_anchor END,tier='premium',expires_at=MAX(COALESCE(account_memberships.expires_at,0),excluded.expires_at),updated_at=MAX(account_memberships.updated_at+1,excluded.updated_at)`).bind(LONG_EXPIRY,now,now,user.id,user.id,version),
   db(env).prepare('INSERT INTO member_redemptions (account_id,code_version,redeemed_at,expires_at) VALUES (?,?,?,?) ON CONFLICT(account_id,code_version) DO NOTHING').bind(user.id,version,now,LONG_EXPIRY)
  ]);
  if(!await db(env).prepare('SELECT id FROM security_audit WHERE id=?').bind(auditId).first())throw new MemberError('此账号已兑换过该会员码，每个账号限兑换一次。',409);
  return membershipFor(env,user.id);
 }
-const limit=(env,key,fallback)=>{const n=Number(env[key]);return Number.isSafeInteger(n)&&n>0?n:fallback;};
-const realtimeLimits=(env,id)=>[
- {id:'realtime-minute:'+id,limit:3,period:60,message:'连接尝试过于频繁，请等待 1 分钟后重试。'},
- {id:'realtime-day',limit:limit(env,'MEMBER_DAILY_REALTIME_LIMIT',12),period:86400,message:'本站今天的实时连接次数已用完（所有会员共享），将在 UTC 00:00 恢复。请联系管理员调整连接上限。'}
-];
+const configuredLimit=(env,key)=>{const n=Number(env[key]);return Number.isSafeInteger(n)&&n>0?n:null;};
+const realtimeLimits=(env,id)=>{
+ const rules=[{id:'realtime-minute:'+id,limit:3,period:60,message:'连接尝试过于频繁，请等待 1 分钟后重试。'}],daily=configuredLimit(env,'MEMBER_DAILY_REALTIME_LIMIT');
+ if(daily!==null)rules.push({id:'realtime-day',limit:daily,period:86400,message:'本站今天的实时连接次数已用完（所有会员共享），将在 UTC 00:00 恢复。请联系管理员调整连接上限。'});
+ return rules;
+};
 export async function realtimeAvailability(request,env){
  const member=await memberSession(request,env);if(!member)throw new MemberError('请先登录并开通会员；已到期的会员无法使用共享服务。',401);
  if(!sharedReady(env))throw new MemberError('管理员尚未配置共享 API，请稍后再试。');
@@ -90,8 +104,9 @@ export async function allowSharedRequest(request,env,kind,characters=0){
   for(const rule of realtimeLimits(env,id))await consume(env,rule.id,rule.limit,rule.period,1,rule.message);
  }else{
   await consume(env,'text-minute:'+id,60,60);
-  await consume(env,'text-day',limit(env,'MEMBER_DAILY_TEXT_LIMIT',3000),86400);
-  await consume(env,'text-characters-day',limit(env,'MEMBER_DAILY_CHARACTER_LIMIT',5000000),86400,characters);
+  const requests=configuredLimit(env,'MEMBER_DAILY_TEXT_LIMIT'),charactersLimit=configuredLimit(env,'MEMBER_DAILY_CHARACTER_LIMIT');
+  if(requests!==null)await consume(env,'text-day',requests,86400);
+  if(charactersLimit!==null)await consume(env,'text-characters-day',charactersLimit,86400,characters);
  }
  return env.OPENAI_API_KEY;
 }

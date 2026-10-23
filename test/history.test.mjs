@@ -96,6 +96,7 @@ test('uploaded PPT survives live translation, trial, summary and cloud reopen',a
  globalThis.Worker=class {terminate(){} postMessage({buffer,name}){extractMaterial(Buffer.from(buffer),name).then(result=>this.onmessage({data:{result}}));}};
  globalThis.fetch=(path,options={})=>{
   if(path==='/api/openai/responses'){inputs.push(JSON.parse(options.body).input);return Promise.resolve(Response.json({output:[{content:[{type:'output_text',text:'机会成本：最佳替代方案的价值。'}]}]}));}
+  if(path==='/api/service/summary'){const data=JSON.parse(options.body);inputs.push(data.snapshot.materials.map(m=>m.pages.map(p=>p.text).join('\n')).join('\n'));return Promise.resolve(Response.json({summary:'机会成本：最佳替代方案的价值。',summarySources:data.snapshot.materials.map(m=>({id:m.id,name:m.name,pageCount:m.pages.length,warnings:m.warnings||[]})),summaryScope:'classroom'}));}
   return handle(new Request('https://example.test'+path,{...options,headers:{...options.headers,Cookie:a.cookie.split(';')[0],Origin:'https://example.test'}}),noProvider,env);
  };
  const live=new BrowserLive();live.connect=async function(){this.session.status='recording';await this.persist();};

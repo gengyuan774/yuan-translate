@@ -1,3 +1,4 @@
+import {TRANSLATION_INSTRUCTIONS} from '../src/translation-prompt.js';
 import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -34,7 +35,7 @@ test('truncated stream retains partial text, fails visibly, and does not issue d
 test('Worker streaming path retains membership checks, forwards streaming, and filters secret metadata',async()=>{
  const {env}=environment();const who=await createVerifiedAccountSession(env,{provider:'email',subject:'stream@test.invalid',label:'test'}),cookie=who.cookie.split(';')[0];
  await handle(req('/api/member/login',{code:env.MEMBER_CODE},cookie),()=>{},env);
- const body={input:'lesson',instructions:'translate',stream:true};let count=0;
+ const body={input:'lesson',instructions:TRANSLATION_INSTRUCTIONS,stream:true};let count=0;
  const upstream=async(url,options)=>{count++;assert.equal(JSON.parse(options.body).stream,true);const c=channel();c.send({type:'response.created',secret:env.OPENAI_API_KEY});c.send({type:'response.output_text.delta',delta:'你好'});c.send({type:'response.completed',response:{status:'completed'}});c.end();return new Response(c.body,{headers:{'Content-Type':'text/event-stream'}});};
  assert.equal((await handle(req('/api/openai/responses',body,'',{'X-Access-Mode':'member'}),upstream,env)).status,401);
  const response=await handle(req('/api/openai/responses',body,cookie,{'X-Access-Mode':'member'}),upstream,env);

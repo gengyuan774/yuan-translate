@@ -1,7 +1,7 @@
 export const DAY=86400000,MAX_MEMBERSHIP_END=Date.parse('2100-01-01T00:00:00.000Z');
 export const PAYMENT_PLANS=Object.freeze({
- regular30:Object.freeze({id:'regular30',label:'普通会员',tier:'regular',amount:1500,currency:'CNY',days:30,durationMs:30*DAY}),
- premium30:Object.freeze({id:'premium30',label:'金会员',tier:'premium',amount:5000,currency:'CNY',days:30,durationMs:30*DAY})
+ regular30:Object.freeze({id:'regular30',label:'普通会员',tier:'regular',amount:3000,currency:'CNY',days:30,durationMs:30*DAY}),
+ premium30:Object.freeze({id:'premium30',label:'金会员',tier:'premium',amount:8000,currency:'CNY',days:30,durationMs:30*DAY})
 });
 export const retainedDuration=order=>Math.floor(order.duration_ms*Math.max(0,order.amount-order.refunded_amount)/order.amount);
 // Consumed time is never taken from another order. Unused queued orders move

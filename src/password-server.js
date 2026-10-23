@@ -40,7 +40,8 @@ export async function passwordAccount(request,env,data,register=false){
  const id=crypto.randomUUID(),now=Date.now(),passwordHash=await hashPassword(password);
  try{await env.DB.batch([
   env.DB.prepare('INSERT INTO accounts (id, provider, subject_hash, label, created_at) VALUES (?, ?, ?, ?, ?)').bind(id,'password',await digest('password:'+username),username,now),
-  env.DB.prepare('INSERT INTO account_passwords (username, account_id, password_hash, created_at) VALUES (?, ?, ?, ?)').bind(username,id,passwordHash,now)
+  env.DB.prepare('INSERT INTO account_passwords (username, account_id, password_hash, created_at) VALUES (?, ?, ?, ?)').bind(username,id,passwordHash,now),
+  env.DB.prepare('INSERT INTO account_trials (account_id, granted_at) VALUES (?, ?)').bind(id,now)
  ]);}catch(e){if(await env.DB.prepare('SELECT username FROM account_passwords WHERE username = ?').bind(username).first())throw new MemberError('这个账号已注册，请直接登录或换一个账号。',409);throw e;}
  const result=await issueAccountSession(env,{id,provider:'password',label:username});await (await auditStatement(env,id,'account','registered')).run();return result;
 }

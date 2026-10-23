@@ -2,23 +2,26 @@ import {readEvents,responseText} from './text-stream.js';
 import {upstreamError} from './upstream-error.js';
 // Only publish translation text and our own error messages, never raw provider
 // metadata, credentials, or arbitrary upstream error strings.
-export function translationStream(body){
+export function translationStream(body,{finish=async()=>{}}={}){
  const encoder=new TextEncoder();
  async function* events(){
-  let text='';
+  let text='',success=false,usage=null;
   try{
    for await(const event of readEvents(body)){
     if(event.type==='response.output_text.delta'){text+=event.delta||'';yield {type:'delta',text:event.delta||''};}
     if(event.type==='response.completed'){
+     usage=event.response?.usage||null;
      if(event.response?.status==='incomplete')throw new Error();
      const finalText=responseText(event.response||{})||text;if(!finalText.trim())throw new Error();
-     yield {type:'completed',text:finalText};return;
+     success=true;yield {type:'completed',text:finalText};return;
     }
     if(['error','response.failed','response.incomplete'].includes(event.type)){
+     usage=event.response?.usage||null;
      yield {type:'error',message:upstreamError(503,event.error||event.response?.error).message};return;
     }
    }
   }catch{}
+  finally{await finish({success,usage});}
   yield {type:'error',message:'翻译连接中断，已显示的译文可能不完整，请稍后重试。'};
  }
  const iterator=events();

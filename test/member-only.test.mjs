@@ -1,3 +1,4 @@
+import {TRANSLATION_INSTRUCTIONS} from '../src/translation-prompt.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -7,7 +8,7 @@ import {localApi} from '../src/local-api.js';
 test('personal credentials cannot call text or audio endpoints',async()=>{
  for(const route of ['/api/openai/responses','/api/openai/token'])for(const mode of ['', 'member']){
   let called=false;
-  const r=await handle(new Request('https://example.test'+route,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer sk-personal-only-test','X-Access-Mode':mode},body:JSON.stringify({input:'hello',instructions:'translate'})}),async()=>{called=true;throw Error('must not call');});
+  const r=await handle(new Request('https://example.test'+route,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer sk-personal-only-test','X-Access-Mode':mode},body:JSON.stringify({input:'hello',instructions:TRANSLATION_INSTRUCTIONS})}),async()=>{called=true;throw Error('must not call');});
   assert.equal(r.status,401);assert.equal(called,false);
  }
  assert.deepEqual(authHeaders('sk-personal-only-test'),{'X-Access-Mode':'member'});

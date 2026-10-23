@@ -1,3 +1,5 @@
+import {safeSession} from '../src/realtime-relay.js';
+import {transcriptionConfig} from '../src/languages.js';
 import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,14 +14,10 @@ const create=code=>localApi('/api/sessions',{method:'POST',body:JSON.stringify({
 const patch=(id,code)=>localApi('/api/sessions/'+id,{method:'PATCH',body:JSON.stringify({sourceLanguage:code})});
 test('all language choices reach transcription; automatic detection removes the hint',async()=>{
  for(const {code} of LANGUAGES){
-  let payload;
-  const response=await memberHandle(new Request('https://example.test/api/openai/token',{method:'POST',headers:{Authorization:'Bearer sk-simulated-only-not-a-real-key','Content-Type':'application/json'},body:JSON.stringify({sourceLanguage:code})}),async(url,init)=>{payload=JSON.parse(init.body);return Response.json({value:'temporary'});});
-  assert.equal(response.status,200);
-  const transcription=payload.session.audio.input.transcription;
-  assert.deepEqual(transcription.languages,code==='auto'?undefined:[code]);
+  const payload=safeSession({session:{audio:{input:{transcription:transcriptionConfig(code,'Test')}}}},'Test','accurate');
+  assert.deepEqual(payload.session.audio.input.transcription.languages,code==='auto'?undefined:[code]);
  }
- const invalid=await memberHandle(new Request('https://example.test/api/openai/token',{method:'POST',headers:{Authorization:'Bearer sk-simulated-only-not-a-real-key','Content-Type':'application/json'},body:JSON.stringify({sourceLanguage:'invalid'})}),()=>{throw new Error('Must not call upstream');});
- assert.equal(invalid.status,400);
+ assert.throws(()=>safeSession({session:{audio:{input:{transcription:{model:'gpt-transcribe',languages:['invalid']}}}}},'Test','accurate'),e=>e.status===400);
 });
 test('new choices persist while existing English records retain their original language',async()=>{
  assert.equal((await create()).sourceLanguage,'auto');
@@ -53,7 +51,7 @@ test('paused language changes wait for upstream acknowledgement and preserve in-
   assert.deepEqual(sent.at(-1).session.audio.input.transcription.languages,['ja']);
   await live.handle({type:'session.updated'});assert.equal(live.paused,false);assert.equal(live.appliedLanguage,'ja');
   let reconnected=false;
-  live.connect=async()=>{reconnected=true;live.sendConfiguration();};
+  live.connect=async()=>{reconnected=true;live.upstream={readyState:1,send:data=>sent.push(JSON.parse(data)),close(){}};live.sendConfiguration();};
   await live.command({type:'pause'});await live.changeLanguage('auto');await live.command({type:'resume'});
   assert.equal(reconnected,true);
   assert.equal(Object.hasOwn(sent.at(-1).session.audio.input.transcription,'languages'),false);
@@ -65,14 +63,15 @@ test('paused language changes wait for upstream acknowledgement and preserve in-
 test('auto detection starts without language hints and clears prior hints through a fresh connection',async t=>{
  const sockets=[],requests=[];
  class MockSocket{
-  constructor(){this.readyState=1;this.bufferedAmount=0;this.hints=undefined;sockets.push(this);}
+  constructor(url){requests.push({sourceLanguage:new URL(url).searchParams.get('language')});this.readyState=1;this.bufferedAmount=0;this.hints=undefined;sockets.push(this);}
   send(data){const e=JSON.parse(data);if(e.type!=='session.update')return;
    const tr=e.session.audio.input.transcription;
    if(Object.hasOwn(tr,'languages')){assert.ok(Array.isArray(tr.languages)&&tr.languages.length>0,'API rejects empty language hints');this.hints=tr.languages;}
   }
   close(){this.readyState=3;}
  }
- t.mock.method(globalThis,'fetch',async(url,init)=>{assert.equal(url,'/api/openai/token');requests.push(JSON.parse(init.body));return Response.json({value:'temporary-test-secret'});});
+ globalThis.location={href:'https://example.test/',protocol:'https:'};t.after(()=>delete globalThis.location);
+ t.mock.method(globalThis,'fetch',async(url)=>{assert.equal(url,'/api/openai/status');return Response.json({available:true});});
  t.mock.property(globalThis,'WebSocket',MockSocket);
  await activateClientMembership();
  const live=new BrowserLive();live.session=await create('auto');
@@ -81,17 +80,17 @@ test('auto detection starts without language hints and clears prior hints throug
   assert.equal(sockets[0].hints,undefined);
   await live.handle({type:'session.updated'});
   await live.command({type:'pause'});await live.changeLanguage('en');await live.command({type:'resume'});
-  assert.deepEqual(sockets[0].hints,['en']);await live.handle({type:'session.updated'});
-  await live.command({type:'pause'});live.pending=1;live.meta=[{sourceLanguage:'en',offset:1000}];
+  sockets[1].onopen();assert.deepEqual(sockets[1].hints,['en']);await live.handle({type:'session.updated'});
+  live.pending=1;await live.command({type:'pause'});live.meta=[{sourceLanguage:'en',offset:1000}];
   await live.handle({type:'input_audio_buffer.committed',item_id:'last-english'});
   await live.changeLanguage('auto');const resume=live.command({type:'resume'});
-  assert.equal(sockets.length,1);assert.equal(live.paused,true);
+  assert.equal(sockets.length,2);assert.equal(live.paused,true);
   await live.handle({type:'conversation.item.input_audio_transcription.completed',item_id:'last-english',transcript:''});
   await resume;
-  assert.equal(sockets.length,2);assert.equal(sockets[0].readyState,3);
+  assert.equal(sockets.length,3);assert.equal(sockets[0].readyState,3);
   assert.equal(sockets[0].onmessage,null);assert.equal(live.paused,true);
-  assert.equal(requests.at(-1).sourceLanguage,'auto');sockets[1].onopen();
-  assert.equal(sockets[1].hints,undefined);
+  assert.equal(requests.at(-1).sourceLanguage,'auto');sockets[2].onopen();
+  assert.equal(sockets[2].hints,undefined);
   await live.handle({type:'session.updated'});
   assert.equal(live.paused,false);assert.equal(live.appliedLanguage,'auto');
   assert.equal(live.session.segments[0].sourceLanguage,'en');

@@ -67,7 +67,7 @@ test('language changes and long gaps never merge unrelated turns',()=>{
 });
 async function setup(t){
  await activateClientMembership();const requests=[];
- t.mock.method(globalThis,'fetch',async(path,options)=>{assert.equal(path,'/api/openai/responses');const body=JSON.parse(options.body);requests.push(body);return Response.json({output:[{content:[{type:'output_text',text:body.instructions.includes('同声传译员')?'合并后的中文译文':'课堂总结'}]}]});});
+ t.mock.method(globalThis,'fetch',async(path,options)=>{assert.ok(['/api/openai/responses','/api/service/summary'].includes(path));const body=JSON.parse(options.body);requests.push(body);return path==='/api/service/summary'?Response.json({summary:'课堂总结'}):Response.json({output:[{content:[{type:'output_text',text:'合并后的中文译文'}]}]});});
  const live=new BrowserLive();live.paused=false;live.started=Date.now();live.base=0;live.turns={flush(){}};
  live.session={id:crypto.randomUUID(),title:'分句测试',createdAt:new Date().toISOString(),status:'recording',sourceLanguage:'en',segments:[],materials:[],warnings:[],summary:''};
  await saveSession(live.session);t.after(()=>live.close());
@@ -94,7 +94,7 @@ test('pause flushes a fragment immediately and late final transcripts are also t
 test('finish flushes unfinished text before generating notes',async t=>{
  const f=await setup(t);await f.commit('a',0);await f.done('a','This is because.');assert.equal(f.requests.length,0);
  await f.live.command({type:'finish'});for(let i=0;i<100&&!f.live.closed;i++)await new Promise(r=>setTimeout(r,5));
- assert.equal(f.live.closed,true);assert.equal(f.requests.length,2);assert.match(f.requests[0].instructions,/同声传译员/);assert.match(f.requests[1].instructions,/笔记助手/);assert.match(f.requests[1].input,/This is because\./);
+ assert.equal(f.live.closed,true);assert.equal(f.requests.length,2);assert.match(f.requests[0].instructions,/同声传译员/);assert.equal(f.requests[1].instructions,undefined);assert.match(f.requests[1].snapshot.segments[0].source,/This is because\./);
 });
 test('a failed transcription forms a boundary instead of joining speech across missing audio',async t=>{
  const f=await setup(t);await f.commit('a',0);await f.done('a','Because.');await f.commit('missing',1000);await f.commit('c',2000);await f.done('c','the price goes up significantly.');

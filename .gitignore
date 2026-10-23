@@ -6,4 +6,3 @@ dist/
 src/generated-assets.js
 
 node_modules
-.DS_Store

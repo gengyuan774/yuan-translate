@@ -8,6 +8,7 @@ await build({entryPoints:['src/membership.js'],outfile:'dist/client/membership.j
 await build({entryPoints:['src/pdf-export.js'],outfile:'dist/client/pdf-export.js',bundle:true,format:'esm',platform:'browser',target:'es2022',minify:true,legalComments:'none'});
 await build({entryPoints:['src/parser-worker.js'],outfile:'dist/client/parser-worker.js',bundle:true,format:'esm',platform:'browser',target:'es2022',minify:true,legalComments:'none'});
 await copyFile('node_modules/pdfjs-dist/build/pdf.worker.min.mjs','dist/client/pdf.worker.min.mjs');
+for(const name of ['usage','admin-usage'])await build({entryPoints:['src/'+name+'.js'],outfile:'dist/client/'+name+'.js',bundle:true,format:'esm',platform:'browser',target:'es2022',minify:true,legalComments:'none'});
 const assets={};for(const name of await readdir('dist/client')){
  const bytes=await readFile('dist/client/'+name),binary=/\.(ttf|jpe?g|png|webp)$/i.test(name);
  assets[name==='index.html'?'/':'/'+name]={...(binary?{base64:bytes.toString('base64')}:{text:bytes.toString('utf8')}),type:name.endsWith('.ttf')?'font/ttf':/\.jpe?g$/i.test(name)?'image/jpeg':name.endsWith('.png')?'image/png':name.endsWith('.webp')?'image/webp':name.endsWith('.js')||name.endsWith('.mjs')?'application/javascript; charset=utf-8':name.endsWith('.css')?'text/css; charset=utf-8':name.endsWith('.svg')?'image/svg+xml':name.endsWith('.txt')?'text/plain; charset=utf-8':'text/html; charset=utf-8'};

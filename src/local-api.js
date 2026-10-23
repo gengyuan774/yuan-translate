@@ -4,16 +4,16 @@ import {getKey,accessConfig} from './access.js';
 import {validLanguage,setSessionLanguage} from './languages.js';
 export {getKey} from './access.js';
 export const busy=new Set();
-export async function complete(s){
+export async function complete(s,{autoSummary=true}={}){
  const owner=accountId(),previousError=s.summaryError;
  // Await durable local writes, but never make generation depend on cloud sync.
  const save=()=>saveSession(s,{background:true,owner});
  try{
-  s.status='summarizing';await save();s.summary=await summarize(s,getKey());
+  if(autoSummary){s.status='summarizing';await save();s.summary=await summarize(s,getKey());}
   s.status='completed';delete s.summaryError;
   if(previousError)s.warnings=(s.warnings||[]).filter(w=>w!==previousError+'；原文已保存，可稍后重新生成总结。');
   await save();return s;
- }catch(e){s.status='summary_failed';s.summaryError=e.message;await save().catch(()=>{});throw e;}
+ }catch(e){s.status=autoSummary?'summary_failed':'interrupted';if(autoSummary)s.summaryError=e.message;await save().catch(()=>{});throw e;}
 }
 async function parsedFile(file,name){
  if(file.size>20*1024*1024)throw new Error('每份资料最大 20 MB');

@@ -19,8 +19,17 @@ export const accountMaterials=sqliteTable('account_materials',{
 },t=>[primaryKey({columns:[t.accountId,t.classId,t.id]})]);
 
 export const accountMemberships=sqliteTable('account_memberships',{
- accountId:text('account_id').primaryKey().references(()=>accounts.id),tier:text('tier',{enum:['none','regular','premium']}).notNull(),expiresAt:integer('expires_at'),updatedAt:integer('updated_at').notNull()
+ accountId:text('account_id').primaryKey().references(()=>accounts.id),tier:text('tier',{enum:['none','regular','premium']}).notNull(),expiresAt:integer('expires_at'),updatedAt:integer('updated_at').notNull(),quotaAnchor:integer('quota_anchor')
 });
+export const accountTrials=sqliteTable('account_trials',{
+ accountId:text('account_id').primaryKey().references(()=>accounts.id),grantedAt:integer('granted_at').notNull()
+});
+export const planBalances=sqliteTable('plan_balances',{
+ accountId:text('account_id').notNull().references(()=>accounts.id),scope:text('scope').notNull(),start:integer('start').notNull(),audioUsed:integer('audio_used').notNull().default(0),audioReserved:integer('audio_reserved').notNull().default(0),summariesUsed:integer('summaries_used').notNull().default(0),summariesReserved:integer('summaries_reserved').notNull().default(0)
+},t=>[primaryKey({columns:[t.accountId,t.scope,t.start]})]);
+export const serviceSummaryJobs=sqliteTable('service_summary_jobs',{
+ id:text('id').primaryKey(),accountId:text('account_id').notNull().references(()=>accounts.id),balanceScope:text('balance_scope').notNull(),balanceStart:integer('balance_start').notNull(),inputHash:text('input_hash').notNull(),state:text('state').notNull(),result:text('result'),createdAt:integer('created_at').notNull(),expiresAt:integer('expires_at').notNull()
+},t=>[index('service_summary_cache').on(t.accountId,t.inputHash,t.state),index('service_summary_expiry').on(t.state,t.expiresAt)]);
 export const memberRedemptions=sqliteTable('member_redemptions',{
  accountId:text('account_id').notNull().references(()=>accounts.id),codeVersion:text('code_version').notNull(),redeemedAt:integer('redeemed_at').notNull(),expiresAt:integer('expires_at').notNull()
 },t=>[primaryKey({columns:[t.accountId,t.codeVersion]})]);
@@ -70,4 +79,27 @@ export const paymentRefunds=sqliteTable('payment_refunds',{
 },t=>[uniqueIndex('payment_refund_request').on(t.orderId,t.requestId)]);
 export const paymentEvents=sqliteTable('payment_events',{
  id:text('id').primaryKey(),orderId:text('order_id').notNull().references(()=>paymentOrders.id),kind:text('kind').notNull(),payloadHash:text('payload_hash').notNull(),createdAt:integer('created_at').notNull()
+});
+
+export const serviceAccounts=sqliteTable('service_accounts',{
+ accountId:text('account_id').primaryKey().references(()=>accounts.id),anchor:integer('anchor').notNull(),restrictedUntil:integer('restricted_until').notNull().default(0),reason:text('reason').notNull().default(''),leaseId:text('lease_id'),leaseOwner:text('lease_owner'),leaseExpires:integer('lease_expires').notNull().default(0)
+});
+export const servicePeriods=sqliteTable('service_periods',{
+ accountId:text('account_id').notNull().references(()=>accounts.id),start:integer('start').notNull(),audioUsed:integer('audio_used').notNull().default(0),audioReserved:integer('audio_reserved').notNull().default(0),inputUsed:integer('input_used').notNull().default(0),inputReserved:integer('input_reserved').notNull().default(0),outputUsed:integer('output_used').notNull().default(0),outputReserved:integer('output_reserved').notNull().default(0)
+},t=>[primaryKey({columns:[t.accountId,t.start]})]);
+export const serviceSettings=sqliteTable('service_settings',{
+ id:text('id').primaryKey(),warningCents:integer('warning_cents'),hardCents:integer('hard_cents'),paused:integer('paused').notNull().default(0),quotaEnforced:integer('quota_enforced').notNull().default(0),regularMinutes:integer('regular_minutes').notNull().default(60),regularInput:integer('regular_input').notNull().default(1000000),regularOutput:integer('regular_output').notNull().default(100000),premiumMinutes:integer('premium_minutes').notNull().default(240),premiumInput:integer('premium_input').notNull().default(4000000),premiumOutput:integer('premium_output').notNull().default(400000),revision:integer('revision').notNull().default(0),updatedAt:integer('updated_at').notNull()
+});
+export const serviceBudgets=sqliteTable('service_budgets',{
+ month:text('month').primaryKey(),spent:integer('spent').notNull().default(0),reserved:integer('reserved').notNull().default(0)
+});
+export const serviceRequests=sqliteTable('service_requests',{
+ id:text('id').primaryKey(),accountId:text('account_id').references(()=>accounts.id,{onDelete:'set null'}),period:integer('period').notNull(),month:text('month').notNull(),kind:text('kind').notNull(),state:text('state').notNull(),audioMs:integer('audio_ms').notNull(),inputTokens:integer('input_tokens').notNull(),outputTokens:integer('output_tokens').notNull(),reservedCost:integer('reserved_cost').notNull(),cost:integer('cost').notNull().default(0),expiresAt:integer('expires_at').notNull(),createdAt:integer('created_at').notNull(),measurement:text('measurement').notNull().default('reserved'),requestId:text('request_id'),model:text('model').notNull(),pricingVersion:text('pricing_version').notNull(),
+ balanceScope:text('balance_scope'),balanceStart:integer('balance_start')
+},t=>[index('service_requests_account').on(t.accountId,t.createdAt),index('service_requests_expiry').on(t.state,t.expiresAt)]);
+export const serviceAlerts=sqliteTable('service_alerts',{
+ id:text('id').primaryKey(),month:text('month').notNull(),kind:text('kind').notNull(),createdAt:integer('created_at').notNull(),details:text('details').notNull()
+});
+export const serviceAdminSessions=sqliteTable('service_admin_sessions',{
+ hash:text('hash').primaryKey(),kind:text('kind').notNull(),expiresAt:integer('expires_at').notNull()
 });

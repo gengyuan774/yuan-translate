@@ -17,7 +17,7 @@ test('payments fail closed without merchant setup and never expose credentials',
  assert.equal(paymentReady(f.env),false);
  const config=await (await f.api('/api/payments/config')).json();
  assert.equal(config.enabled,false);assert.equal(config.automaticRenewal,false);assert.equal(config.periodDays,30);
- assert.deepEqual(config.plans.map(p=>[p.id,p.amount,p.currency]),[['regular30',1500,'CNY'],['premium30',5000,'CNY']]);
+ assert.deepEqual(config.plans.map(p=>[p.id,p.amount,p.currency]),[['regular30',3000,'CNY'],['premium30',8000,'CNY']]);
  assert.equal((await f.api('/api/payments/orders',{planId:'regular30',requestId:crypto.randomUUID()})).status,503);
  assert.equal((await f.api('/api/payments/orders',undefined,'')).status,401);
  assert.equal((await f.api('/api/admin/payments')).status,401);
@@ -30,7 +30,7 @@ test('authoritative server price, owned orders, and same-origin mutation enforce
   assert.equal((await f.api('/api/payments/orders',{planId:'regular30',requestId:crypto.randomUUID(),...extra})).status,400);
  }
  const order=await f.create();
- assert.equal(order.amount,1500);assert.equal(order.currency,'CNY');assert.equal(order.state,'pending');
+ assert.equal(order.amount,3000);assert.equal(order.currency,'CNY');assert.equal(order.state,'pending');
  assert.equal((await f.api('/api/payments/orders/'+order.id,undefined,f.otherCookie)).status,404);
  assert.equal((await f.api('/api/payments/orders/'+order.id+'/check',{},f.otherCookie)).status,404);
  assert.equal((await f.api('/api/payments/orders',{planId:'premium30',requestId:crypto.randomUUID()},f.cookie,{Origin:'https://hostile.test'})).status,403);
@@ -72,7 +72,7 @@ test('forged, stale, unknown-key, modified-body or broken-cipher notifications c
 });
 test('genuine signatures do not authorize wrong order, merchant, app, total, currency, transaction or status',async()=>{
  const f=await paymentFixture(),order=await f.create(),fact=f.paid(order.id);
- for(const override of [{mchid:'9999999999'},{appid:'wxffffffffffffffff'},{amount:{total:1,currency:'CNY'}},{amount:{total:1500,currency:'USD'}},{transaction_id:''},{trade_type:'JSAPI'},{trade_state:'NOTPAY'}]){
+ for(const override of [{mchid:'9999999999'},{appid:'wxffffffffffffffff'},{amount:{total:1,currency:'CNY'}},{amount:{total:3000,currency:'USD'}},{transaction_id:''},{trade_type:'JSAPI'},{trade_state:'NOTPAY'}]){
   assert.equal((await f.notification({...fact,...override})).status,409);
   assert.equal(row(f,order.id).state,'pending');
  }
@@ -113,17 +113,37 @@ test('same and different tier renewals queue exactly 30 days and preserve legacy
 test('processing refund retains rights; success adjusts only that order and shifts later periods, exactly once',async t=>{
  let now=Date.parse('2026-10-22T12:00:00Z');t.mock.method(Date,'now',()=>now);
  const f=await paymentFixture(),a=await confirm(f,await f.create()),b=await confirm(f,await f.create('premium30'));
- now+=10*DAY;const fact=f.refundFact(a,{amount:750,state:'PROCESSING',id:'partial_refund'});
+ now+=10*DAY;const fact=f.refundFact(a,{amount:1500,state:'PROCESSING',id:'partial_refund'});
  await applyPaymentFacts(f.env,a.id,f.payments.get(a.id),{refund:fact});
  assert.equal(row(f,a.id).grant_end,a.grant_end);
  fact.refund_status='SUCCESS';f.payments.get(a.id).trade_state='REFUND';
  const eventId=crypto.randomUUID();assert.equal((await f.notification(fact,{kind:'REFUND.SUCCESS',eventId})).status,204);
- const after=row(f,a.id),later=row(f,b.id);assert.equal(after.refunded_amount,750);assert.equal(after.grant_end,a.grant_start+15*DAY);
+ const after=row(f,a.id),later=row(f,b.id);assert.equal(after.refunded_amount,1500);assert.equal(after.grant_end,a.grant_start+15*DAY);
  assert.equal(later.grant_start,after.grant_end);assert.equal(later.grant_end-later.grant_start,30*DAY);
  await f.notification(fact,{kind:'REFUND.SUCCESS',eventId});await f.notification(fact,{kind:'REFUND.SUCCESS'});
  assert.equal(row(f,b.id).grant_end,later.grant_end);
  await applyPaymentFacts(f.env,a.id,f.payments.get(a.id),{refund:{...fact,refund_status:'CLOSED'}});
- assert.equal(row(f,a.id).refunded_amount,750);
+ assert.equal(row(f,a.id).refunded_amount,1500);
+});
+test('historical 1500-cent order retains its snapshot price and proportional refund after a plan price change',async t=>{
+ let now=Date.parse('2026-10-22T12:00:00Z');t.mock.method(Date,'now',()=>now);
+ const f=await paymentFixture(),requestId=crypto.randomUUID(),created=await f.create('regular30',requestId);
+ // Model a durable order created before the price change; current plans must
+ // not overwrite its gross amount, duration, or signed provider total.
+ f.sql.prepare('UPDATE payment_orders SET amount=1500 WHERE id=?').run(created.id);
+ f.payments.get(created.id).amount={total:1500,currency:'CNY'};
+ const historical=await f.create('regular30',requestId);
+ assert.equal(historical.id,created.id);assert.equal(historical.amount,1500);
+ const newer=await f.create();assert.equal(newer.amount,3000);
+ const paid=await confirm(f,historical);assert.equal(paid.amount,1500);assert.equal(paid.duration_ms,30*DAY);
+ now+=10*DAY;
+ const fact=f.refundFact(paid,{amount:750,id:'legacy_half_refund'});
+ f.payments.get(paid.id).trade_state='REFUND';
+ assert.equal((await f.notification(fact,{kind:'REFUND.SUCCESS'})).status,204);
+ const after=row(f,paid.id);assert.equal(after.amount,1500);assert.equal(after.refunded_amount,750);
+ assert.equal(after.grant_end,paid.grant_start+15*DAY);
+ assert.equal((await (await f.api('/api/payments/orders/'+paid.id)).json()).order.amount,1500);
+ assert.equal(row(f,newer.id).amount,3000);assert.equal(row(f,newer.id).refunded_amount,0);
 });
 test('full refund cannot take already used time or legacy membership; closed refunds cannot regress',async t=>{
  let now=Date.parse('2026-10-22T12:00:00Z');t.mock.method(Date,'now',()=>now);
@@ -143,7 +163,7 @@ test('refund arriving before payment notification does not temporarily grant ful
  const f=await paymentFixture(),order=await f.create();f.paid(order.id,{trade_state:'REFUND'});
  const fact=f.refundFact(order);
  assert.equal((await f.notification(fact,{kind:'REFUND.SUCCESS'})).status,204);
- assert.equal(row(f,order.id).refunded_amount,1500);assert.equal((await membershipFor(f.env,f.account.id)).active,false);
+ assert.equal(row(f,order.id).refunded_amount,3000);assert.equal((await membershipFor(f.env,f.account.id)).active,false);
  assert.equal((await f.notification({...f.payments.get(order.id),trade_state:'SUCCESS'})).status,204);
  assert.equal((await membershipFor(f.env,f.account.id)).active,false);
 });
@@ -151,7 +171,7 @@ test('unknown REFUND query holds rights pending refund facts; malformed refund c
  const f=await paymentFixture(),order=await f.create();f.paid(order.id,{trade_state:'REFUND'});
  await reconcilePayment(f.env,row(f,order.id),f.upstream);
  assert.equal(row(f,order.id).review_reason,'refund_status_review');assert.equal((await membershipFor(f.env,f.account.id)).active,false);
- const good=f.refundFact(order,{amount:750});
+ const good=f.refundFact(order,{amount:1500});
  await assert.rejects(applyPaymentFacts(f.env,order.id,f.payments.get(order.id),{refund:{...good,transaction_id:'foreign'}}),/不匹配/);
  await applyPaymentFacts(f.env,order.id,f.payments.get(order.id),{refund:good});
  assert.equal(row(f,order.id).review_reason,null);assert.equal(row(f,order.id).grant_end-row(f,order.id).grant_start,15*DAY);
@@ -164,14 +184,14 @@ test('admin-only refund reservations prevent over-refund and retries use the ori
  const beforeCalls=f.calls.length;response=await f.admin('/refund',data);assert.equal((await response.json()).refund.id,first.id);
  assert.equal(f.calls.slice(beforeCalls).some(c=>c.path==='/v3/refund/domestic/refunds'),false);
  assert.equal((await f.admin('/refund',{...data,amount:1001})).status,409);
- assert.equal((await f.admin('/refund',{...data,amount:501,requestId:crypto.randomUUID()})).status,409);
+ assert.equal((await f.admin('/refund',{...data,amount:2001,requestId:crypto.randomUUID()})).status,409);
  f.refunds.get(first.id).status='SUCCESS';f.payments.get(order.id).trade_state='REFUND';
  await reconcileRefund(f.env,row(f,order.id),first.id,f.upstream);
  assert.equal(row(f,order.id).refunded_amount,1000);
  assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM security_audit WHERE action='payment_refund_requested'").get().n,1);
 });
 test('uncertain refund request retains reservation and retry never makes a new refund ID',async()=>{
- const f=await paymentFixture(),order=await confirm(f,await f.create()),data={orderId:order.id,amount:1500,requestId:crypto.randomUUID(),reason:'test retry'};
+ const f=await paymentFixture(),order=await confirm(f,await f.create()),data={orderId:order.id,amount:3000,requestId:crypto.randomUUID(),reason:'test retry'};
  let failed=false;const upstream=async(url,options)=>{if(!failed&&new URL(url).pathname==='/v3/refund/domestic/refunds'){failed=true;throw new Error('timeout');}return f.upstream(url,options);};
  await assert.rejects(requestRefund(f.env,data,upstream),/查单/);
  const reserved=f.sql.prepare('SELECT * FROM payment_refunds WHERE order_id=?').get(order.id);assert.equal(reserved.state,'created');
@@ -217,7 +237,7 @@ test('expired unpaid orders close only after provider confirmation; fake success
  assert.notEqual(profileLoginDestination('https://evil.test'),'https://evil.test');
 });
 test('membership cap, immutable 30-day duration and current tier selection handle boundary cases',()=>{
- const now=Date.now(),order={id:'a',state:'paid',review_reason:null,sequence:1,tier:'premium',amount:5000,refunded_amount:0,duration_ms:30*DAY,grant_start:null,grant_end:null,floor_start:MAX_MEMBERSHIP_END-DAY};
+ const now=Date.now(),order={id:'a',state:'paid',review_reason:null,sequence:1,tier:'premium',amount:8000,refunded_amount:0,duration_ms:30*DAY,grant_start:null,grant_end:null,floor_start:MAX_MEMBERSHIP_END-DAY};
  assert.throws(()=>scheduleGrants([order],now));
  assert.equal(combinedMembership(null,[{...order,grant_start:now+DAY,grant_end:now+31*DAY}],now).active,false);
  assert.equal(combinedMembership({tier:'regular',expires_at:now+DAY},[{...order,grant_start:now,grant_end:now+2*DAY}],now).tier,'premium');
@@ -256,10 +276,10 @@ test('personal data export contains only the owner payment ledger and no payment
 test('concurrent successful refunds cannot exceed order gross or overwrite another order rights',async()=>{
  const f=await paymentFixture(),a=await confirm(f,await f.create()),b=await confirm(f,await f.create('premium30'));
  const results=await Promise.allSettled([
-  applyPaymentFacts(f.env,a.id,f.payments.get(a.id),{refund:f.refundFact(a,{id:'concurrent_one',amount:1000})}),
-  applyPaymentFacts(f.env,a.id,f.payments.get(a.id),{refund:f.refundFact(a,{id:'concurrent_two',amount:1000})})
+  applyPaymentFacts(f.env,a.id,f.payments.get(a.id),{refund:f.refundFact(a,{id:'concurrent_one',amount:2000})}),
+  applyPaymentFacts(f.env,a.id,f.payments.get(a.id),{refund:f.refundFact(a,{id:'concurrent_two',amount:2000})})
  ]);
  assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
- assert.equal(row(f,a.id).refunded_amount,1000);
+ assert.equal(row(f,a.id).refunded_amount,2000);
  assert.equal(row(f,b.id).grant_end-row(f,b.id).grant_start,30*DAY);
 });

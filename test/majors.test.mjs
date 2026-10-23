@@ -38,7 +38,7 @@ test('changed preference applies to trial and recording without rewriting histor
  setAccount(null);await activateClientMembership();
  const s=await localApi('/api/sessions',{method:'POST',body:'{}'});s.segments=[{id:'old',source:'Existing source',translation:'已有翻译',offset:0}];s.summary='已有笔记';await saveSession(s);
  await saveMajorPreference({code:'finance'});const original=globalThis.fetch;let calls=0;
- globalThis.fetch=async(url,options)=>{calls++;assert.match(JSON.parse(options.body).input,/金融学/);return Response.json({output:[{content:[{type:'output_text',text:'模拟金融术语译文'}]}]});};
+ globalThis.fetch=async(url,options)=>{calls++;const body=JSON.parse(options.body);if(url==='/api/service/summary'){assert.equal(body.snapshot.major.code,'finance');return Response.json({summary:'模拟金融术语总结'});}assert.match(body.input,/金融学/);return Response.json({output:[{content:[{type:'output_text',text:'模拟金融术语译文'}]}]});};
  try{await localApi('/api/sessions/'+s.id+'/try',{method:'POST',body:JSON.stringify({text:'The bond has a higher yield.'})});}finally{globalThis.fetch=original;}
  assert.equal(calls,2);const saved=await getSession(s.id);assert.equal(saved.major.code,'finance');assert.equal(saved.segments[0].translation,'已有翻译');assert.equal(saved.summary,'已有笔记');
  await saveMajorPreference({code:'medicine'});const live=new BrowserLive();live.connect=async()=>{};

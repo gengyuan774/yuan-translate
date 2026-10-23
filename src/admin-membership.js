@@ -1,5 +1,6 @@
 import {securityRate} from './security-common.js';
 import {MemberError} from './errors.js';
+import {membershipFor} from './member.js';
 const digest=async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
 export async function requireMemberAdmin(request,env){
  await securityRate(request,env,'admin-auth','',120);
@@ -26,12 +27,13 @@ export async function updateAdminMembership(env,data){
  if(tier==='none'?expiresAt!==null:(!Number.isFinite(expiry)||new Date(expiry).toISOString()!==expiresAt||expiry<=Date.now()||expiry>Date.parse('2100-01-01T00:00:00.000Z')))throw new MemberError('会员到期时间不正确',400);
  const before=await adminMembership(env,username);
  if(before.accountId!==accountId||before.updatedAt!==expectedUpdatedAt)throw new MemberError('账号或会员状态已变化，请重新读取后再修改',409);
- const id=crypto.randomUUID(),updatedAt=Math.max(Date.now(),expectedUpdatedAt+1),end=tier==='none'?null:expiry;
+ const current=await membershipFor(env,accountId),now=Date.now();
+ const id=crypto.randomUUID(),updatedAt=Math.max(now,expectedUpdatedAt+1),end=tier==='none'?null:expiry,anchor=tier==='none'?null:current.active?current.periodAnchor:now;
  // D1 batch is transactional: the audit and update both use the same expected revision.
  await env.DB.batch([
   env.DB.prepare(`INSERT INTO membership_admin_audit (id, account_id, username, previous_tier, previous_expires_at, tier, expires_at, reason, created_at)
    SELECT ?, account_id, ?, tier, expires_at, ?, ?, ?, ? FROM account_memberships WHERE account_id=? AND updated_at=?`).bind(id,username,tier,end,reason.trim(),updatedAt,accountId,expectedUpdatedAt),
-  env.DB.prepare('UPDATE account_memberships SET tier=?, expires_at=?, updated_at=? WHERE account_id=? AND updated_at=?').bind(tier,end,updatedAt,accountId,expectedUpdatedAt)
+  env.DB.prepare('UPDATE account_memberships SET tier=?, expires_at=?, updated_at=?, quota_anchor=? WHERE account_id=? AND updated_at=?').bind(tier,end,updatedAt,anchor,accountId,expectedUpdatedAt)
  ]);
  const audit=await env.DB.prepare('SELECT id FROM membership_admin_audit WHERE id=?').bind(id).first();
  if(!audit)throw new MemberError('会员状态已变化，请重新读取后再修改',409);

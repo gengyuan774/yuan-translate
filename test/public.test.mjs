@@ -1,3 +1,4 @@
+import {TRANSLATION_INSTRUCTIONS} from '../src/translation-prompt.js';
 import {memberHandle,activateClientMembership} from './access-fixture.mjs';
 import 'fake-indexeddb/auto';
 import test from 'node:test';
@@ -24,12 +25,12 @@ test('edge enforces caller key, same origin and fixed upstream model',async()=>{
  assert.equal((await handle(request('/api/openai/responses',{}, {Origin:'https://evil.test'}))).status,403);
  assert.equal((await handle(request('/api/arbitrary'))).status,404);
  let seen;
- const r=await memberHandle(request('/api/openai/responses',{input:'lecture',instructions:'translate',model:'other',store:true,max_output_tokens:99999}),async(url,init)=>{seen={url,p:JSON.parse(init.body)};return answer('译文');});
- assert.equal(r.status,200);assert.equal(seen.url,'https://api.openai.com/v1/responses');assert.equal(seen.p.store,false);assert.equal(seen.p.model,'gpt-4.1-mini');assert.equal(seen.p.max_output_tokens,4000);
+ const r=await memberHandle(request('/api/openai/responses',{input:'lecture',instructions:TRANSLATION_INSTRUCTIONS,model:'other',store:true,max_output_tokens:99999}),async(url,init)=>{seen={url,p:JSON.parse(init.body)};return answer('译文');});
+ assert.equal(r.status,200);assert.equal(seen.url,'https://api.openai.com/v1/responses');assert.equal(seen.p.store,false);assert.equal(seen.p.model,'gpt-4.1-mini');assert.equal(seen.p.max_output_tokens,1800);
 });
-test('ephemeral credentials only configure transcription',async()=>{
- let payload;await memberHandle(request('/api/openai/token',{title:'Economics',session:{type:'realtime'}}),async(url,init)=>{assert.equal(url,'https://api.openai.com/v1/realtime/client_secrets');payload=JSON.parse(init.body);return Response.json({value:'ephemeral'});});
- assert.equal(payload.session.type,'transcription');assert.equal(payload.expires_after.seconds,60);assert.equal(payload.session.audio.input.format.rate,24000);
+test('ephemeral credentials are disabled so audio cannot bypass server budget controls',async()=>{
+ let called=false;const response=await memberHandle(request('/api/openai/token',{title:'Economics',session:{type:'realtime'}}),async()=>{called=true;return Response.json({value:'ephemeral'});});
+ assert.equal(response.status,410);assert.equal(called,false);
 });
 test('PPTX follows slide order and rejects old PPT or image-only content',async()=>{
  const zip=zipSync({'ppt/presentation.xml':strToU8('<p:presentation><p:sldIdLst><p:sldId r:id="r2"/><p:sldId r:id="r1"/></p:sldIdLst></p:presentation>'),'ppt/_rels/presentation.xml.rels':strToU8('<Relationships><Relationship Id="r1" Target="slides/slide1.xml"/><Relationship Id="r2" Target="slides/slide2.xml"/></Relationships>'),'ppt/slides/slide1.xml':strToU8('<p:sld><a:p><a:r><a:t>Second: trade-off</a:t></a:r></a:p></p:sld>'),'ppt/slides/slide2.xml':strToU8('<p:sld><a:p><a:r><a:t>First: opportunity cost</a:t></a:r></a:p></p:sld>')});
@@ -50,12 +51,12 @@ test('class materials are isolated, reference-aware and escaped in export',async
 });
 test('trial uses mock responses and never appends to classroom transcript',async()=>{
  await activateClientMembership();const s=await create();const original=globalThis.fetch;
- globalThis.fetch=async()=>answer('模拟测试输出');
+ globalThis.fetch=async path=>path==='/api/service/summary'?Response.json({summary:'模拟测试输出'}):answer('模拟测试输出');
  try{const result=await localApi('/api/sessions/'+s.id+'/try',{method:'POST',body:JSON.stringify({text:'Opportunity cost is a trade-off.'})});assert.equal(result.translation,'模拟测试输出');assert.equal(result.summary,'模拟测试输出');assert.equal((await getSession(s.id)).segments.length,0);assert.equal(busy.has(s.id),false);}finally{globalThis.fetch=original;}
 });
 test('finish waits for final transcript and queued translation before summarizing',async()=>{
  const s=await create(),live=new BrowserLive(),events=[];live.session=s;live.base=0;live.started=Date.now();live.pending=1;live.closing=true;live.onmessage=e=>events.push(JSON.parse(e.data));
- const original=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return answer(calls===1?'最终译文':'最终总结');};
+ const original=globalThis.fetch;let calls=0;globalThis.fetch=async path=>{calls++;return path==='/api/service/summary'?Response.json({summary:'最终总结'}):answer('最终译文');};
  try{await live.finalize();assert.equal(live.finalizing,undefined);await live.handle({type:'input_audio_buffer.committed',item_id:'last'});await live.handle({type:'conversation.item.input_audio_transcription.completed',item_id:'last',transcript:'Final spoken sentence.'});
  for(let i=0;i<100&&!live.closed;i++)await new Promise(r=>setTimeout(r,5));
  assert.equal(live.closed,true);const saved=await getSession(s.id);assert.equal(saved.segments[0].translation,'最终译文');assert.equal(saved.summary,'最终总结');assert.equal(saved.status,'completed');assert.equal(events.at(-1).type,'finished');
