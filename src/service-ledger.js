@@ -55,6 +55,24 @@ export async function acquireLease(request,env){
  if(!row)throw new MemberError('此账号已有一节课堂正在录音，请先暂停或结束另一台设备上的录音。',409);
  return {id,accountId:s.member.accountId,tier:s.member.tier};
 }
+export async function recordingAvailability(request,env){
+ const s=await requireService(request,env),owner=new URL(request.url).searchParams.get('owner')||'';
+ const a=s.account;
+ if(a.lease_id&&a.lease_expires>Date.now()&&(!owner||a.lease_owner!==owner))return {available:false,code:'recording_busy',message:'此账号的另一个页面或设备仍占用录音连接。可先暂停那里的录音，或停止其他录音后在此设备继续。若原页面已崩溃，连接占用最多 90 秒后自动释放。',recording:{id:a.lease_id,expiresAt:a.lease_expires}};
+ return {available:true};
+}
+export async function takeOverRecording(request,env,leaseId){
+ const s=await requireService(request,env);
+ if(typeof leaseId!=='string'||!/^[a-f0-9-]{36}$/.test(leaseId))throw new MemberError('录音状态无效，请刷新后重试。',400);
+ const row=await stmt(env,'UPDATE service_accounts SET lease_id=NULL,lease_owner=NULL,lease_expires=0 WHERE account_id=? AND lease_id=? RETURNING account_id',s.member.accountId,leaseId).first();
+ if(!row)throw new MemberError('录音状态已变化，请重新点击开始上课。',409);
+ return {ok:true};
+}
+export async function releaseOwnedRecording(env,accountId,owner){
+ if(typeof owner!=='string'||!/^[a-f0-9-]{36}$/.test(owner))throw new MemberError('录音标识无效',400);
+ await stmt(env,'UPDATE service_accounts SET lease_id=NULL,lease_owner=NULL,lease_expires=0 WHERE account_id=? AND lease_owner=?',accountId,owner).run();
+ return {ok:true};
+}
 export async function releaseLease(env,lease){await stmt(env,'UPDATE service_accounts SET lease_id=NULL,lease_expires=0 WHERE account_id=? AND lease_id=?',lease.accountId,lease.id).run();}
 export async function renewLease(request,env,lease){
  await requireService(request,env);

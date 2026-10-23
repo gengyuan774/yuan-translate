@@ -8,7 +8,7 @@ import {TranscriptMerger} from './transcript-merge.js';
 import {busy,getKey,complete} from './local-api.js';
 const lastOffset=session=>{const row=session.segments.at(-1);return row?.sourceParts?.at(-1)?.offset??row?.offset??0;};
 export class BrowserLive{
- constructor(){this.connectionOwner=crypto.randomUUID();this.readyState=0;this.bufferedAmount=0;this.paused=true;this.pending=0;this.meta=[];this.queue=Promise.resolve();this.jobs=new Set();this.receivedTurns=new Set();this.turnRows=[];this.merger=new TranscriptMerger({submit:row=>this.enqueueTranslation(row),remove:row=>{this.session.segments=this.session.segments.filter(item=>item!==row);}});this.closed=false;this.closing=false;setTimeout(()=>{if(!this.closed){this.readyState=1;this.onopen?.();}},0);}
+ constructor({connectionOwner=crypto.randomUUID()}={}){this.connectionOwner=connectionOwner;this.readyState=0;this.bufferedAmount=0;this.paused=true;this.pending=0;this.meta=[];this.queue=Promise.resolve();this.jobs=new Set();this.receivedTurns=new Set();this.turnRows=[];this.merger=new TranscriptMerger({submit:row=>this.enqueueTranslation(row),remove:row=>{this.session.segments=this.session.segments.filter(item=>item!==row);}});this.closed=false;this.closing=false;setTimeout(()=>{if(!this.closed){this.readyState=1;this.onopen?.();}},0);}
  emit(value){this.onmessage?.({data:JSON.stringify(value)});}
  persist(){if(!Object.hasOwn(this,'owner'))this.owner=accountId();return saveSession(this.session,{background:true,deferCloud:this.session.status==='recording',owner:this.owner}).catch(e=>{this.emit({type:'warning',message:e.message});});}
  warn(message){if(this.session){this.session.warnings.push(message);this.persist();}this.emit({type:'warning',message});}
@@ -43,7 +43,7 @@ export class BrowserLive{
   if(this.closed)return;
   if(data instanceof ArrayBuffer){this.checkIdle();if(this.renewing&&!this.replayed&&!this.paused&&!this.closing){if(this.backlogBytes+data.byteLength>24000*2*45){this.paused=true;this.emit({type:'fatal',message:'自动续接耗时过长，已暂停录音，请重新连接。'});return;}this.audioBacklog.push(Buffer.from(data));this.backlogBytes+=data.byteLength;return;}if(!this.paused&&this.upstream?.readyState===1&&!this.closing){this.turns.push(Buffer.from(data));this.bufferedAmount=this.upstream.bufferedAmount;}return;}
   let e;try{e=JSON.parse(data);}catch{return;}
-  this.command(e).catch(error=>{this.emit({type:'fatal',message:error.message});});
+  this.command(e).catch(error=>{this.emit({type:'fatal',message:error.message,...(error.code==='recording_busy'?{code:error.code,recording:error.recording}:{})});});
  }
  releasePausedConnection(){
   clearTimeout(this.pauseTimer);
@@ -94,8 +94,8 @@ export class BrowserLive{
  async connect(waitUntilReady=false){
   const settings=translationMode(this.session.translationMode);this.merger.maxWait=settings.mergeWait;
   if(this.upstream){this.drainTranscripts(true);this.merger.flush();this.upstream.onclose=null;this.upstream.onmessage=null;this.upstream.onerror=null;this.upstream.close();}clearTimeout(this.limitTimer);clearTimeout(this.connectTimer);
-  const preflight=await fetch('/api/openai/status',{headers:authHeaders(getKey()),cache:'no-store',signal:AbortSignal.timeout(20000)});
-  const availability=await preflight.json();if(!preflight.ok||availability.available===false)throw new Error(availability.error?.message||availability.message||'无法建立录音连接');
+  const preflight=await fetch('/api/openai/status?owner='+this.connectionOwner,{headers:authHeaders(getKey()),cache:'no-store',signal:AbortSignal.timeout(20000)});
+  const availability=await preflight.json();if(!preflight.ok||availability.available===false){const error=new Error(availability.error?.message||availability.message||'无法建立录音连接');if(availability.code==='recording_busy')Object.assign(error,{code:availability.code,recording:availability.recording});throw error;}
   const socketUrl=new URL('/api/openai/realtime',location.href);socketUrl.protocol=location.protocol==='https:'?'wss:':'ws:';
   socketUrl.searchParams.set('owner',this.connectionOwner);
   socketUrl.searchParams.set('title',this.session.title||'课堂');socketUrl.searchParams.set('mode',this.session.translationMode||'accurate');socketUrl.searchParams.set('language',language(this.session.sourceLanguage).code);
@@ -142,7 +142,7 @@ export class BrowserLive{
    if(this.paused||this.closing||this.finishingRequested)this.merger.flush();
    this.emit({type:'session',session:s});await this.persist();if(this.closing)this.finalize();
   }
-  if(e.type==='error'){const message=String(e.error?.message||'实时识别出错，请重新连接。').replace(/sk-[\w-]+/g,'[已隐藏]');this.paused=true;clearTimeout(this.connectTimer);this.connectedReject?.(new Error(message));this.merger.flush();this.warn(message);this.emit({type:'fatal',message});}
+  if(e.type==='error'){const message=String(e.error?.message||'实时识别出错，请重新连接。').replace(/sk-[\w-]+/g,'[已隐藏]');this.paused=true;clearTimeout(this.connectTimer);this.connectedReject?.(new Error(message));this.merger.flush();this.warn(message);this.emit({type:'fatal',message,...(e.error?.code==='recording_busy'?{code:e.error.code,recording:e.error.recording}:{})});}
  }
  drainTranscripts(force=false){
   while(this.turnRows.length){

@@ -12,6 +12,7 @@ import {localApi} from './local-api.js';
 import {downloadNotes} from './download.js';
 import {BrowserLive} from './live.js';
 import {closeFailedConnection} from './live-failure.js';
+import {showRecordingConflict} from './recording-conflict.js';
 import {initTranscriptFollow} from './transcript-follow.js';
 import {initSubtitleFloat} from './subtitle-float.js';
 import {rememberClassroom,restoreClassroom} from './classroom-navigation.js';
@@ -21,6 +22,7 @@ const transcriptFollow=initTranscriptFollow($('transcript'),$('autoscroll'),$('f
 initSubtitleFloat({button:$('subtitle-float'),transcript:$('transcript'),partial:$('partial'),status:$('status'),timer:$('timer'),message:$('message'),title:$('breadcrumb-title'),onReturn:showClassroom,notify:notice});
 let config, current=null, ws=null, stream=null, context=null, capture=null, muted=null, micSource=null, micLabel='', mode='idle', startedAt=0, elapsed=0, tick;
 const pendingSync=new Set();
+const recordingOwner=crypto.randomUUID();
 let exportBusy=false, materialBusy=false, languageBusy=false, selectedLanguage='auto', profileUser=null, historyWarning='';
 let profileView=profileRoute(location.pathname,location.search)||'overview';
 $('source-language').innerHTML=LANGUAGES.map(l=>`<option value="${l.code}">${l.label} → 中文</option>`).join('');
@@ -33,6 +35,13 @@ let flushResolver, wakeLock, partials=new Map(), lastEnded=false;
 const escape=s=>String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const time=ms=>{const s=Math.max(0,Math.floor(ms/1000));return [Math.floor(s/3600),Math.floor(s/60)%60,s%60].map(x=>String(x).padStart(2,'0')).join(':');};
 function notice(text){$('message').textContent=text;$('message').hidden=!text;}
+function recordingConflict(availability){
+ showRecordingConflict($('message'),availability,async leaseId=>{
+  const response=await fetch('/api/openai/recording/takeover',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({leaseId}),signal:AbortSignal.timeout(15000)}),data=await response.json();
+  if(!response.ok)throw new Error(data.error?.message||'无法切换录音，请重新点击开始上课。');
+  await begin();
+ });
+}
 async function summaryReady(){
  const pending=accountId()&&await sessionSyncPending(current.id).catch(()=>true);
  notice('总结已就绪，'+(pending?'笔记已保存在此设备，账户同步待完成；可直接下载 PDF。':accountId()?'完整笔记已保存到账户。':'完整笔记已保存在当前浏览器。'));
@@ -107,10 +116,10 @@ async function begin(){
  if(!config.hasKey){$('settings').showModal();return;}
  notice('');lastEnded=false;controls('connecting');
  try{
-   const check=await fetch('/api/openai/status',{signal:AbortSignal.timeout(15000)});
+   const check=await fetch('/api/openai/status?owner='+recordingOwner,{signal:AbortSignal.timeout(15000)});
    const availability=await check.json();
    if(!check.ok)throw new Error(availability.error?.message||'无法检查翻译服务，请稍后重试。');
-   if(!availability.available)throw new Error(availability.message);
+   if(!availability.available){if(availability.code==='recording_busy'){controls('idle');recordingConflict(availability);return;}throw new Error(availability.message);}
    await acquireMicrophone();
    context=new AudioContext({sampleRate:24000});await context.resume();
    if(context.sampleRate!==24000)throw new Error('当前浏览器不支持所需的音频采样率，请使用 Chrome。');
@@ -128,7 +137,7 @@ async function begin(){
    };
    if(!current)current=await api('/api/sessions',{method:'POST',body:JSON.stringify({sourceLanguage:selectedLanguage,title:$('title').value.trim()||'课堂 '+new Date().toLocaleDateString('zh-CN')})});
    render();await history();
-   ws=new BrowserLive();
+   ws=new BrowserLive({connectionOwner:recordingOwner});
    ws.onopen=()=>send({type:'start',id:current.id});
    ws.onmessage=async({data})=>{
      const e=JSON.parse(data);
@@ -149,6 +158,7 @@ async function begin(){
        if(e.type==='fatal'&&mode==='connecting'){closeFailedConnection(ws);ws=null;controls('idle');await releaseAudio();}
        else {capture?.port.postMessage('flush');controls('paused');}
        notice(e.message||'连接已断开。已保存收到的字幕，点击继续录音重连。');
+       if(e.code==='recording_busy')recordingConflict(e);
      }
      if(e.type==='finished'){
        lastEnded=true;current=e.session;await releaseAudio();partials.clear();renderPartial();controls('ended');render();
@@ -426,6 +436,14 @@ $('password-switch').onclick=()=>{
 };
 for(const id of ['login-username','login-password','password-confirm'])$(id).addEventListener('input',()=>{if(registrationEditable())cancelRegistration('内容已更改，请重新提交注册。');else if(registrationFailed){registrationFailed=false;updatePasswordControls();}});
 window.addEventListener('pagehide',()=>cancelRegistration());
+window.addEventListener('pagehide',()=>{
+ if(!ws||!['recording','paused','connecting','finishing'].includes(mode))return;
+ if(mode==='recording')elapsed+=Date.now()-startedAt;
+ closeFailedConnection(ws);ws=null;controls('idle');
+ void releaseAudio().catch(()=>{});
+ notice('离开页面后录音已停止，返回后可点击继续这节课重新连接。');
+ try{navigator.sendBeacon?.('/api/openai/recording/release',new Blob([JSON.stringify({owner:recordingOwner})],{type:'application/json'}));}catch{}
+});
 window.addEventListener('popstate',()=>cancelRegistration());
 $('password-form').onsubmit=async event=>{
  event.preventDefault();if(materialLocked()||!passwordEnabled)return;

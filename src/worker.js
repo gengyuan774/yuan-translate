@@ -3,7 +3,7 @@ import {verifyTrialTranslation} from './audio-proof.js';
 import {summarizeService} from './summary-service.js';
 import {TRANSLATION_INSTRUCTIONS} from './translation-prompt.js';
 import {trialFor} from './trial.js';
-import {myUsage,publicPlans} from './service-ledger.js';
+import {myUsage,publicPlans,recordingAvailability,takeOverRecording,releaseOwnedRecording} from './service-ledger.js';
 import {meteredText} from './metered-text.js';
 import {realtimeRelay} from './realtime-relay.js';
 import {checkRealtimeConnection} from './realtime-connection.js';
@@ -38,7 +38,7 @@ async function trialInfo(env,accountId){
  const usage=await myUsage(null,env,trial);return {eligible:true,grantedMinutes:60,usedMinutes:usage.usedMinutes,remainingMinutes:usage.remainingMinutes};
 }
 async function enrichUser(env,user){if(user){user.membership=await membershipFor(env,user.id);user.trial=await trialInfo(env,user.id);}return user;}
-export async function handle(request,upstream=fetch,env={}){
+export async function handle(request,upstream=fetch,env={},runtime={}){
  const url=new URL(request.url);
  if(!url.pathname.startsWith('/api/')){
   const asset=assets[profileRoute(url.pathname)?'/':url.pathname==='/usage'?'/usage.html':url.pathname==='/admin/usage'?'/admin-usage.html':url.pathname==='/membership'?'/membership.html':url.pathname==='/membership/orders'?'/orders.html':url.pathname==='/membership/pay'?'/checkout.html':url.pathname==='/recover'?'/recover.html':url.pathname];if(!asset)return new Response('Not found',{status:404});if(request.method!=='GET'&&request.method!=='HEAD')return new Response('Method not allowed',{status:405});
@@ -49,7 +49,15 @@ export async function handle(request,upstream=fetch,env={}){
  if(!paymentNotification&&request.headers.get('Sec-Fetch-Site')==='cross-site')return reply({error:{message:'不允许跨站请求'}},403);
  try{
   if(paymentNotification)return await paymentWebhook(request,env,upstream);
-  if(url.pathname==='/api/openai/realtime')return await realtimeRelay(request,env,upstream);
+  if(url.pathname==='/api/openai/realtime')return await realtimeRelay(request,env,upstream,runtime);
+  if(url.pathname==='/api/openai/recording/release'&&request.method==='POST'){
+   const user=await requireAccount(request,env),data=await readJson(request,1024);await consume(env,'recording-release:'+user.id,30,60);
+   return reply(await releaseOwnedRecording(env,user.id,data.owner));
+  }
+  if(url.pathname==='/api/openai/recording/takeover'&&request.method==='POST'){
+   const user=await requireAccount(request,env),data=await readJson(request,1024);await consume(env,'recording-takeover:'+user.id,3,60);
+   return reply(await takeOverRecording(request,env,data.leaseId));
+  }
   if(url.pathname==='/api/service/plans'&&request.method==='GET')return reply(await publicPlans(env));
   if(url.pathname==='/api/account/usage'&&request.method==='GET'){await requireAccount(request,env);return reply(await myUsage(request,env));}
   if(url.pathname==='/api/service/summary'){
@@ -124,7 +132,7 @@ export async function handle(request,upstream=fetch,env={}){
    if(usage.minutes!==null&&usage.remainingMinutes<=0)return reply({available:false,code:'translation_quota_exhausted',message:usage.tier==='trial'?'1 小时免费翻译已用完，请开通会员继续。':'本期 30 小时翻译额度已用完，请等待下期重置或联系客服。'});
    if(usage.paused)return reply({available:false,message:'本站已暂停新增 AI 消耗，请稍后再试。'});
    if(usage.restrictedUntil>Date.now())return reply({available:false,message:'账号服务暂时受限，请在个人中心查看。'});
-   return reply(availability);
+   return reply(await recordingAvailability(request,env));
   }
   if(!['/api/openai/responses','/api/openai/token'].includes(url.pathname))return reply({error:{message:'Not found'}},404);
   if(request.method!=='POST')return reply({error:{message:'Method not allowed'}},405);
@@ -145,4 +153,4 @@ export async function handle(request,upstream=fetch,env={}){
   return await meteredText(request,env,payload,upstream);
  }catch(error){return reply({error:{message:error instanceof MemberError?error.message:'请求处理失败或服务暂不可用，请稍后重试。'}},error instanceof MemberError?error.status:503);}
 }
-export default {fetch(request,env){return handle(request,fetch,env);}};
+export default {fetch(request,env,ctx){return handle(request,fetch,env,ctx?.waitUntil?{waitUntil:task=>ctx.waitUntil(task)}:{});}};

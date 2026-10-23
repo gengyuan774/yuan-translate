@@ -5,7 +5,7 @@ import {validLanguage,transcriptionConfig} from './languages.js';
 import {openTranscription} from './realtime-connection.js';
 import {restrictAbuse} from './service-admin.js';
 import {validTranslationMode} from './models.js';
-import {acquireLease,releaseLease,renewLease,reserve,settle,settings,serviceBudgetState} from './service-ledger.js';
+import {acquireLease,releaseLease,renewLease,reserve,settle,settings,serviceBudgetState,recordingAvailability} from './service-ledger.js';
 // Audio is held locally for at most one turn. Nothing billable is forwarded
 // before both quota and full-turn cost have been atomically reserved.
 export class MeteredAudio{
@@ -63,12 +63,21 @@ export function safeSession(data,title,mode){
  if(trans?.model!==transcriptionConfig(language,title,mode).model)throw new MemberError('不支持此识别模型。',400);
  return {type:'session.update',session:{type:'transcription',audio:{input:{format:{type:'audio/pcm',rate:24000},transcription:transcriptionConfig(language,title,mode),turn_detection:null}}}};
 }
+function rejectedSocket(runtime,error){
+ const pair=runtime.pairFactory?runtime.pairFactory():new WebSocketPair(),client=pair[0],server=pair[1];server.accept();
+ server.send(JSON.stringify({type:'error',error}));server.close(1011,'connection unavailable');
+ return runtime.upgrade?runtime.upgrade(client):new Response(null,{status:101,webSocket:client});
+}
 export async function realtimeRelay(request,env,upstream,runtime={}){
  if(request.method!=='GET'||request.headers.get('Upgrade')?.toLowerCase()!=='websocket')throw new MemberError('需要实时连接',426);
  if(request.headers.get('Origin')!==new URL(request.url).origin)throw new MemberError('不允许跨站连接',403);
  const query=new URL(request.url).searchParams,title=(query.get('title')||'课堂').slice(0,120),code=query.get('language')||'en',mode=query.get('mode')||'accurate';
  if(!validLanguage(code)||!validTranslationMode(mode))throw new MemberError('语言或翻译模式不正确',400);
- await allowSharedRequest(request,env,'token');const lease=await acquireLease(request,env);
+ await allowSharedRequest(request,env,'token');let lease;
+ try{lease=await acquireLease(request,env);}catch(error){
+  if(error instanceof MemberError&&error.status===409){const conflict=await recordingAvailability(request,env);if(conflict.code==='recording_busy')return rejectedSocket(runtime,conflict);}
+  throw error;
+ }
  let socket;
  try{
   socket=await openTranscription(env,upstream);
@@ -76,19 +85,17 @@ export async function realtimeRelay(request,env,upstream,runtime={}){
   console.warn('realtime_connection_failed',JSON.stringify({code:error.diagnostic?.code,status:error.diagnostic?.status}));await releaseLease(env,lease);
   // Browsers cannot read an HTTP error body from a rejected WebSocket upgrade.
   // Once account checks passed, deliver only our safe error over the socket.
-  const pair=runtime.pairFactory?runtime.pairFactory():new WebSocketPair(),client=pair[0],server=pair[1];server.accept();
-  server.send(JSON.stringify({type:'error',error:{message:error instanceof MemberError?error.message:'网站服务器暂时无法连接语音服务，请稍后重试。'}}));server.close(1011,'upstream unavailable');
-  return runtime.upgrade?runtime.upgrade(client):new Response(null,{status:101,webSocket:client});
+  return rejectedSocket(runtime,{message:error instanceof MemberError?error.message:'网站服务器暂时无法连接语音服务，请稍后重试。'});
  }
  const pair=runtime.pairFactory?runtime.pairFactory():new WebSocketPair(),client=pair[0],server=pair[1];server.accept();
  let closed=false,queue=Promise.resolve(),queued=0,eventQueue=Promise.resolve(),timer,configured=false;
  const emit=event=>{if(!closed&&server.readyState===1)server.send(JSON.stringify(event));};
  const audio=new MeteredAudio(request,env,lease,event=>socket.send(JSON.stringify(event)),emit);
- const close=async(message)=>{
+ const close=(message)=>{const task=(async()=>{
   if(closed)return;emit({type:'error',error:{message:message||'语音连接已结束，请重新连接。'}});closed=true;clearInterval(timer);
   try{socket.close(1000,'closed');}catch{}try{server.close(1000,'closed');}catch{}
   await queue.catch(()=>{});await eventQueue.catch(()=>{});await audio.close();
- };
+ })();runtime.waitUntil?.(task.catch(()=>console.warn('realtime_cleanup_failed')));return task;};
  server.addEventListener('message',event=>{
   if(closed)return;if(typeof event.data!=='string'||event.data.length>110000||++queued>100){void restrictAbuse(env,lease.accountId,'实时连接发送异常（频率或大小）').then(()=>close('发送异常，账号已临时限制 15 分钟。')).catch(()=>close('语音发送异常，已停止连接。'));return;}
   queue=queue.then(async()=>{

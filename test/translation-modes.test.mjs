@@ -42,7 +42,7 @@ test('start and later resume use saved choice; reconnection keeps the active mod
  class Socket{constructor(url){const u=new URL(url);requests.push({translationMode:u.searchParams.get('mode')});this.readyState=1;this.sent=[];sockets.push(this);}send(data){this.sent.push(JSON.parse(data));}close(){this.readyState=3;}}
  t.mock.property(globalThis,'WebSocket',Socket);
  globalThis.location={href:'https://example.test/',protocol:'https:'};t.after(()=>delete globalThis.location);
- t.mock.method(globalThis,'fetch',async(url)=>{assert.equal(url,'/api/openai/status');return Response.json({available:true});});
+ t.mock.method(globalThis,'fetch',async(url)=>{const checked=new URL(url,'https://example.test');assert.equal(checked.pathname,'/api/openai/status');assert.match(checked.searchParams.get('owner'),/^[a-f0-9-]{36}$/);return Response.json({available:true});});
  const live=new BrowserLive();let next;
  try{
   await live.command({type:'start',id:s.id});sockets[0].onopen();

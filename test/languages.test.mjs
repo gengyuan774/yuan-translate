@@ -71,7 +71,7 @@ test('auto detection starts without language hints and clears prior hints throug
   close(){this.readyState=3;}
  }
  globalThis.location={href:'https://example.test/',protocol:'https:'};t.after(()=>delete globalThis.location);
- t.mock.method(globalThis,'fetch',async(url)=>{assert.equal(url,'/api/openai/status');return Response.json({available:true});});
+ t.mock.method(globalThis,'fetch',async(url)=>{const checked=new URL(url,'https://example.test');assert.equal(checked.pathname,'/api/openai/status');assert.match(checked.searchParams.get('owner'),/^[a-f0-9-]{36}$/);return Response.json({available:true});});
  t.mock.property(globalThis,'WebSocket',MockSocket);
  await activateClientMembership();
  const live=new BrowserLive();live.session=await create('auto');
