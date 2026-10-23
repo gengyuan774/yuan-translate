@@ -34,7 +34,8 @@ export async function wechatCall(env,method,path,body,upstream=fetch){
  const raw=body===undefined?'':JSON.stringify(body),timestamp=String(Math.floor(Date.now()/1000)),nonce=crypto.randomUUID().replaceAll('-','');
  let signature;try{signature=base64(await crypto.subtle.sign('RSASSA-PKCS1-v1_5',await rsaKey(env.WECHATPAY_PRIVATE_KEY,true),encode.encode([method,path,timestamp,nonce,raw,''].join('\n'))));}catch{throw new MemberError('支付服务配置无效，请联系客服。',503);}
  const authorization=`WECHATPAY2-SHA256-RSA2048 mchid="${env.WECHATPAY_MCH_ID}",nonce_str="${nonce}",timestamp="${timestamp}",serial_no="${env.WECHATPAY_CERT_SERIAL}",signature="${signature}"`;
- let response;try{response=await upstream('https://api.mch.weixin.qq.com'+path,{method,headers:{Authorization:authorization,'Content-Type':'application/json',Accept:'application/json','Wechatpay-Serial':env.WECHATPAY_PUBLIC_KEY_ID,'User-Agent':'ManjiSufan/1.0'},body:raw||undefined,redirect:'error',signal:AbortSignal.timeout(15000)});}catch{throw new MemberError('支付平台状态暂未确认，请查单后重试，不要重复付款。',503);}
+ let response;try{response=await upstream('https://api.mch.weixin.qq.com'+path,{method,headers:{Authorization:authorization,'Content-Type':'application/json',Accept:'application/json','Wechatpay-Serial':env.WECHATPAY_PUBLIC_KEY_ID,'User-Agent':'ManjiSufan/1.0'},body:raw||undefined,redirect:'manual',signal:AbortSignal.timeout(15000)});}catch{throw new MemberError('支付平台状态暂未确认，请查单后重试，不要重复付款。',503);}
+ if(response.status>=300&&response.status<400)throw new MemberError('支付平台返回异常跳转，请联系客服。',503);
  const text=await response.text();await verifyWechat(response.headers,text,env);
  if(!response.ok)throw new MemberError('支付平台暂未确认操作，请稍后查单或联系客服。',503);
  try{return text?JSON.parse(text):{};}catch{throw new MemberError('支付平台响应无效',503);}

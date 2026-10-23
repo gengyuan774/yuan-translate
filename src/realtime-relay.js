@@ -2,7 +2,7 @@ import {issueAudioProof} from './audio-proof.js';
 import {MemberError} from './errors.js';
 import {allowSharedRequest} from './member.js';
 import {validLanguage,transcriptionConfig} from './languages.js';
-import {upstreamError} from './upstream-error.js';
+import {openTranscription} from './realtime-connection.js';
 import {restrictAbuse} from './service-admin.js';
 import {validTranslationMode} from './models.js';
 import {acquireLease,releaseLease,renewLease,reserve,settle,settings,serviceBudgetState} from './service-ledger.js';
@@ -71,10 +71,15 @@ export async function realtimeRelay(request,env,upstream,runtime={}){
  await allowSharedRequest(request,env,'token');const lease=await acquireLease(request,env);
  let socket;
  try{
-  const response=await upstream('https://api.openai.com/v1/realtime?intent=transcription',{headers:{Authorization:'Bearer '+env.OPENAI_API_KEY,Upgrade:'websocket'},redirect:'error',signal:AbortSignal.timeout(20000)});
-  socket=response.webSocket;if(!socket){const data=await response.json().catch(()=>null);throw new MemberError(upstreamError(response.status,data?.error).message,503);}
-  socket.accept();
- }catch(error){await releaseLease(env,lease);throw error;}
+  socket=await openTranscription(env,upstream);
+ }catch(error){
+  console.warn('realtime_connection_failed',JSON.stringify({code:error.diagnostic?.code,status:error.diagnostic?.status}));await releaseLease(env,lease);
+  // Browsers cannot read an HTTP error body from a rejected WebSocket upgrade.
+  // Once account checks passed, deliver only our safe error over the socket.
+  const pair=runtime.pairFactory?runtime.pairFactory():new WebSocketPair(),client=pair[0],server=pair[1];server.accept();
+  server.send(JSON.stringify({type:'error',error:{message:error instanceof MemberError?error.message:'网站服务器暂时无法连接语音服务，请稍后重试。'}}));server.close(1011,'upstream unavailable');
+  return runtime.upgrade?runtime.upgrade(client):new Response(null,{status:101,webSocket:client});
+ }
  const pair=runtime.pairFactory?runtime.pairFactory():new WebSocketPair(),client=pair[0],server=pair[1];server.accept();
  let closed=false,queue=Promise.resolve(),queued=0,eventQueue=Promise.resolve(),timer,configured=false;
  const emit=event=>{if(!closed&&server.readyState===1)server.send(JSON.stringify(event));};

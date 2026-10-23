@@ -32,7 +32,7 @@ export async function paymentFixture(){
   const fields=Object.fromEntries(Array.from(options.headers.Authorization.matchAll(/(\w+)="([^"]+)"/g),m=>[m[1],m[2]]));
   assert.equal(fields.mchid,env.WECHATPAY_MCH_ID);
   assert.equal(fields.serial_no,env.WECHATPAY_CERT_SERIAL);
-  assert.equal(options.redirect,'error');
+  assert.equal(options.redirect,'manual');
   const canonical=[options.method,new URL(url).pathname+new URL(url).search,fields.timestamp,fields.nonce_str,raw,''].join('\n');
   assert.equal(await crypto.subtle.verify('RSASSA-PKCS1-v1_5',merchant.publicKey,Buffer.from(fields.signature,'base64'),enc.encode(canonical)),true);
   calls.push({path,method:options.method,body});

@@ -10,7 +10,8 @@ export async function meteredText(request,env,payload,upstream){
  let dispatched=false,settled=false;
  try{
   dispatched=true;
-  const response=await upstream('https://api.openai.com/v1/responses',{method:'POST',headers:{Authorization:'Bearer '+env.OPENAI_API_KEY,'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(60000),redirect:'error'});
+  const response=await upstream('https://api.openai.com/v1/responses',{method:'POST',headers:{Authorization:'Bearer '+env.OPENAI_API_KEY,'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(60000),redirect:'manual'});
+  if(response.status>=300&&response.status<400){await settle(env,row,{providerAccepted:false});settled=true;throw new MemberError('翻译服务返回异常跳转，请联系管理员。',503);}
   const requestId=response.headers.get('x-request-id');
   if(response.ok&&payload.stream){
    if(!response.headers.get('Content-Type')?.includes('text/event-stream'))throw new MemberError('翻译服务未返回预期格式，请重试。',503);

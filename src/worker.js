@@ -6,10 +6,11 @@ import {trialFor} from './trial.js';
 import {myUsage,publicPlans} from './service-ledger.js';
 import {meteredText} from './metered-text.js';
 import {realtimeRelay} from './realtime-relay.js';
+import {checkRealtimeConnection} from './realtime-connection.js';
 import {adminCostRoutes,redeemAdminTicket} from './service-admin.js';
 import assets from './generated-assets.js';
 import {TEXT_MODEL} from './models.js';
-import {MemberError,membershipFor,memberSession,sharedReady,loginMember,allowSharedRequest,realtimeAvailability} from './member.js';
+import {MemberError,membershipFor,memberSession,sharedReady,loginMember,allowSharedRequest,realtimeAvailability,consume} from './member.js';
 import {accountUser,requireAccount,signOutAccount} from './account-server.js';
 import {phoneReady,sendPhoneCode,verifyPhoneCode} from './phone-server.js';
 import {passwordAccount} from './password-server.js';
@@ -70,6 +71,10 @@ export async function handle(request,upstream=fetch,env={}){
   }
   if(url.pathname.startsWith('/api/admin/')){
    await requireMemberAdmin(request,env);await securityRate(request,env,'admin','',60);
+   if(url.pathname==='/api/admin/realtime/check'&&request.method==='POST'){
+    await consume(env,'admin-realtime-check',3,60);
+    return reply(await checkRealtimeConnection(env,upstream));
+   }
    if(url.pathname==='/api/admin/payments'||url.pathname.startsWith('/api/admin/payments/'))return reply(await adminPayments(request,env,url.pathname,request.method==='POST'?await readJson(request,4096):undefined,upstream));
    if(url.pathname==='/api/admin/history/check'&&request.method==='GET')return reply(await checkAdminHistory(env,url.searchParams.get('username'),url.searchParams.get('classId')));
    if(url.pathname==='/api/admin/security'&&request.method==='GET')return reply(await adminSecurity(env,url.searchParams.get('username')));

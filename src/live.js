@@ -106,7 +106,7 @@ export class BrowserLive{
   this.connectTimer=setTimeout(()=>{this.paused=true;this.connectedReject?.(new Error('实时连接超时'));this.emit({type:'fatal',message:'实时连接超时，请检查网络后重试'});upstream.close();},20000);
   upstream.onopen=()=>this.sendConfiguration();
   upstream.onmessage=({data})=>this.handle(JSON.parse(data)).catch(e=>this.warn(e.message));
-  upstream.onerror=()=>this.emit({type:'fatal',message:'实时连接失败，请检查网络及 API 权限'});
+  upstream.onerror=()=>this.emit({type:'fatal',message:'无法建立实时连接，请稍后重试；若持续失败，请联系管理员。'});
   upstream.onclose=()=>{this.connectedReject?.(new Error('实时连接已断开'));clearTimeout(this.connectTimer);clearTimeout(this.limitTimer);if(this.closed)return;if(this.closing)this.finalize(true);else {this.paused=true;this.drainTranscripts(true);this.merger.flush();this.warn('实时连接已断开，断开期间的语音未记录。点击继续录音重新连接。');this.emit({type:'disconnected'});}};
   if(waitUntilReady)return connected;connected.catch(()=>{});
  }
@@ -142,7 +142,7 @@ export class BrowserLive{
    if(this.paused||this.closing||this.finishingRequested)this.merger.flush();
    this.emit({type:'session',session:s});await this.persist();if(this.closing)this.finalize();
   }
-  if(e.type==='error'){this.paused=true;this.merger.flush();this.warn(String(e.error?.message||'实时识别出错').replace(/sk-[\w-]+/g,'[已隐藏]'));this.emit({type:'fatal',message:'实时识别出现错误，请检查提示后重新连接。'});}
+  if(e.type==='error'){const message=String(e.error?.message||'实时识别出错，请重新连接。').replace(/sk-[\w-]+/g,'[已隐藏]');this.paused=true;clearTimeout(this.connectTimer);this.connectedReject?.(new Error(message));this.merger.flush();this.warn(message);this.emit({type:'fatal',message});}
  }
  drainTranscripts(force=false){
   while(this.turnRows.length){
