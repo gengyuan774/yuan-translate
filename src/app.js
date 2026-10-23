@@ -1,3 +1,4 @@
+import {initRecordingLifecycle} from './recording-lifecycle.js';
 import {translationMode} from './models.js';
 import {MAJORS,majorName} from './majors.js';
 import {initAccountSecurity} from './security-ui.js';
@@ -31,7 +32,7 @@ let majorBusy=false,accountBusy=false,passwordEnabled=false,passwordRegister=fal
 const registrationClient=new RegistrationClient();
 let registrationPending=false,registrationStage='',registrationFailed=false,passwordSubmissionVersion=0;
 let phoneTimer;
-let flushResolver, wakeLock, partials=new Map(), lastEnded=false;
+let flushResolver, wakeLock, partials=new Map(), lastEnded=false, resumeAfterSystemInterruption=false;
 const escape=s=>String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const time=ms=>{const s=Math.max(0,Math.floor(ms/1000));return [Math.floor(s/3600),Math.floor(s/60)%60,s%60].map(x=>String(x).padStart(2,'0')).join(':');};
 function notice(text){$('message').textContent=text;$('message').hidden=!text;}
@@ -48,21 +49,21 @@ async function summaryReady(){
  if($('auto-export').checked)await download('pdf-summary');
 }
 async function api(path,options={}){return localApi(path,options);}
-function updateTranslationModeLabel(){const active=['recording','paused','connecting','finishing'].includes(mode);$('translation-mode-badge').textContent=translationMode(active?current?.translationMode:preferredTranslationMode).label;}
+function updateTranslationModeLabel(){const active=['recording','paused','connecting','reconnecting','finishing'].includes(mode);$('translation-mode-badge').textContent=translationMode(active?current?.translationMode:preferredTranslationMode).label;}
 function controls(next){
- mode=next;const recording=mode==='recording',busy=['connecting','finishing'].includes(mode),live=['recording','paused'].includes(mode);
+ mode=next;const recording=mode==='recording',busy=['connecting','finishing'].includes(mode),live=['recording','paused','reconnecting'].includes(mode);
  $('start').hidden=live || mode==='finishing';$('start').disabled=busy;$('start').textContent=mode==='connecting'?'正在连接…':current?.segments.length&&!current.demo?'继续这节课':'● 开始上课';
  $('pause').hidden=!live;$('pause').textContent=mode==='paused'?'▶ 继续录音':'Ⅱ 暂停';$('finish').hidden=!live && mode!=='finishing';$('finish').disabled=mode==='finishing'||languageBusy;$('pause').disabled=languageBusy;
  $('finish').textContent=config?.paidMember?'■ 结束并总结':'■ 结束课堂';
  $('new-class').disabled=busy||live||materialBusy||languageBusy;$('demo').disabled=busy||live||materialBusy||languageBusy;$('title').disabled=busy||live||!!current;
  $('status-dot').classList.toggle('live',recording);document.querySelector('.meter').classList.toggle('live',recording);
- $('status').textContent=({idle:'准备就绪',connecting:'连接中',recording:'正在听课',paused:'已暂停',finishing:'正在整理课堂',ended:'课堂已结束'})[mode];
+ $('status').textContent=({idle:'准备就绪',connecting:'连接中',recording:'正在听课',reconnecting:'正在自动重连',paused:'已暂停',finishing:'正在整理课堂',ended:'课堂已结束'})[mode];
  $('status-detail').textContent=recording?(micLabel||'本机麦克风')+' · '+direction(selectedLanguage):mode==='paused'?'点击继续录音，接着记录课堂':mode==='finishing'?'请保持页面打开，笔记正在生成':'优先使用本机麦克风 · '+direction(selectedLanguage);
  $('retry-summary').disabled=busy||live||materialBusy||languageBusy;updateMaterialControls();updateLanguageUI();updateTranslationModeLabel();
 }
 function updateLanguageUI(){
  $('source-language').value=selectedLanguage;
- $('source-language').disabled=materialBusy||languageBusy||!!current?.demo||['recording','connecting','finishing'].includes(mode);
+ $('source-language').disabled=materialBusy||languageBusy||!!current?.demo||['recording','connecting','reconnecting','finishing'].includes(mode);
  $('source-language').title=mode==='recording'?'暂停录音后可切换语言':'';
  $('language-pair').textContent=direction(selectedLanguage);
 }
@@ -81,7 +82,7 @@ function render(){
  $('summary').hidden=!current.summary;$('summary-empty').hidden=!!current.summary;$('summary').innerHTML=renderNotes(current.summary);
  $('summary-badge').textContent=current.demo?'示例笔记':current.summary?'已生成':current.status==='summary_failed'?'需重试':current.status==='summarizing'?'生成中':'待生成';
  updateExportControls();
- $('retry-summary').hidden=(!current.segments.some(s=>s.source)&&!current.materials?.some(m=>m.enabled!==false))||['recording','connecting','finishing'].includes(mode);$('retry-summary').textContent=current.segments.some(s=>s.source)?(current.summary?'更新课堂总结':'生成课堂总结'):'生成资料预习总结';renderMaterials();if(current.summaryStale)$('summary-badge').textContent='资料已更新 · 待重新总结';
+ $('retry-summary').hidden=(!current.segments.some(s=>s.source)&&!current.materials?.some(m=>m.enabled!==false))||['recording','connecting','reconnecting','finishing'].includes(mode);$('retry-summary').textContent=current.segments.some(s=>s.source)?(current.summary?'更新课堂总结':'生成课堂总结'):'生成资料预习总结';renderMaterials();if(current.summaryStale)$('summary-badge').textContent='资料已更新 · 待重新总结';
  $('save-state').textContent=current.demo?'演示数据 · 不调用 API':(historyWarning?'已保存在此设备 · 账户同步待完成':pendingSync.has(current.id)?'已保存在此设备 · 等待账户同步':accountId()?'已保存到账户':'已保存在当前浏览器');
  const warnings=current.warnings || [];if(warnings.length)notice(warnings.at(-1));
 }
@@ -105,14 +106,13 @@ async function flush(){
 async function acquireMicrophone(){
  const next=await openLocalMicrophone();stream?.getTracks().forEach(t=>t.stop());stream=next;micLabel=stream.getAudioTracks()[0]?.label||'本机麦克风';
  stream.getAudioTracks()[0].onended=async()=>{
-  if(mode==='recording')await pauseRecording();
-  if(['recording','paused','connecting'].includes(mode))notice('本机麦克风已断开，点击继续录音可重新连接。');
+  if(['recording','reconnecting'].includes(mode)){await pauseRecording(true);notice('麦克风被系统中断，返回页面后会尝试恢复录音。');if(document.visibilityState==='visible')void restoreRecording();}
  };
 }
 async function begin(){
- if(translationModeBusy||accountBusy||materialBusy||languageBusy||majorBusy||['recording','connecting','finishing'].includes(mode))return;
+ if(translationModeBusy||accountBusy||materialBusy||languageBusy||majorBusy||['recording','connecting','reconnecting','finishing'].includes(mode))return;
  if(!await requireLogin())return;
- if(translationModeBusy||accountBusy||materialBusy||languageBusy||majorBusy||['recording','connecting','finishing'].includes(mode))return;
+ if(translationModeBusy||accountBusy||materialBusy||languageBusy||majorBusy||['recording','connecting','reconnecting','finishing'].includes(mode))return;
  if(!config.hasKey){$('settings').showModal();return;}
  notice('');lastEnded=false;controls('connecting');
  try{
@@ -152,10 +152,12 @@ async function begin(){
      if(e.type==='warning')notice(e.message);
      if(e.type==='status'){$('status-detail').textContent=e.message;}
      if(e.type==='paused'){$('status-detail').textContent='麦克风已暂停 · 字幕已保存';}
+     if(e.type==='recovering'){if(mode==='recording'){elapsed+=Date.now()-startedAt;clearInterval(tick);}controls('reconnecting');notice(e.message);}
+     if(e.type==='recovered')notice(e.message);
      if(['disconnected','idle','fatal'].includes(e.type)){
        if(mode==='recording'){elapsed+=Date.now()-startedAt;clearInterval(tick);}
        stream?.getAudioTracks().forEach(t=>t.enabled=false);
-       if(e.type==='fatal'&&mode==='connecting'){closeFailedConnection(ws);ws=null;controls('idle');await releaseAudio();}
+       if(e.type==='fatal'&&['connecting','reconnecting'].includes(mode)){closeFailedConnection(ws);ws=null;controls('idle');await releaseAudio();}
        else {capture?.port.postMessage('flush');controls('paused');}
        notice(e.message||'连接已断开。已保存收到的字幕，点击继续录音重连。');
        if(e.code==='recording_busy')recordingConflict(e);
@@ -169,7 +171,7 @@ async function begin(){
    };
    ws.onerror=()=>notice('连接失败，请检查网络后重试。');
    ws.onclose=async()=>{
-     if(!lastEnded && ['recording','connecting','paused','finishing'].includes(mode)){
+     if(!lastEnded && ['recording','connecting','reconnecting','paused','finishing'].includes(mode)){
        if(mode==='recording')elapsed+=Date.now()-startedAt;
        await releaseAudio();controls('idle');notice('连接中断，已收到的字幕保留在本机。可继续这节课，或重新生成总结。');
        try{current=await api('/api/sessions/'+current.id);render();}catch{}
@@ -178,17 +180,19 @@ async function begin(){
  }catch(e){await releaseAudio();controls('idle');notice(e.name==='NotAllowedError'?'未获得麦克风权限，请在浏览器地址栏中允许麦克风，然后重新开始。':e.message);}
 }
 function renderPartial(){const text=[...partials.values()].join(' ');$('partial').textContent=text?'正在识别 · '+text:'';$('partial').hidden=!text;}
-async function pauseRecording(){
+async function pauseRecording(automatic=false){
+ resumeAfterSystemInterruption=automatic===true;
+ if(mode==='reconnecting'){send({type:'pause'});stream?.getAudioTracks().forEach(t=>t.enabled=false);controls('paused');return;}
  if(mode==='recording'){
    $('pause').disabled=true;await flush();$('pause').disabled=false;send({type:'pause'});elapsed+=Date.now()-startedAt;clearInterval(tick);stream?.getAudioTracks().forEach(t=>t.enabled=false);controls('paused');
  }else if(mode==='paused'){
    notice('');if(ws?.readyState===WebSocket.OPEN){
-    controls('connecting');try{if(!stream?.getAudioTracks().some(t=>t.readyState==='live')){await acquireMicrophone();micSource?.disconnect();micSource=context.createMediaStreamSource(stream);micSource.connect(capture);}send({type:'resume'});}catch(error){controls('paused');notice(error.message);}
+    controls('connecting');try{if(context&&context.state!=='running')await context.resume();if(!stream?.getAudioTracks().some(t=>t.readyState==='live')){await acquireMicrophone();micSource?.disconnect();micSource=context.createMediaStreamSource(stream);micSource.connect(capture);}send({type:'resume'});}catch(error){controls('paused');notice(error.message);}
    }else await begin();
  }
 }
 async function finish(){
- if(!current)return;
+ if(!current)return;resumeAfterSystemInterruption=false;
  $('finish').disabled=true;$('pause').disabled=true;if(mode==='recording'){await flush();elapsed+=Date.now()-startedAt;}$('pause').disabled=false;
  controls('finishing');await releaseAudio();send({type:'finish'});
 }
@@ -207,7 +211,7 @@ async function download(format){
  catch(error){$('export-status').textContent='下载失败：'+error.message+' 请重试，课堂记录已保留。';}
  finally{exportBusy=false;updateExportControls();}
 }
-function materialLocked(){return translationModeBusy||accountBusy||majorBusy||materialBusy||languageBusy||['recording','paused','connecting','finishing'].includes(mode);}
+function materialLocked(){return translationModeBusy||accountBusy||majorBusy||materialBusy||languageBusy||['recording','paused','connecting','reconnecting','finishing'].includes(mode);}
 function updateMaterialControls(){
  const locked=materialLocked();$('material-add').disabled=locked;$('try-open').disabled=locked||!!current?.demo;
  $('start').disabled=locked&&mode!=='recording'&&mode!=='paused';
@@ -272,7 +276,7 @@ $('trial-run').onclick=async()=>{
  try{await ensureClass();const result=await api(`/api/sessions/${current.id}/try`,{method:'POST',body:JSON.stringify({text})});current.lastTrial=result;showTrial(result);$('trial-status').textContent='试译完成，结果已保存在这节课中。测试内容未加入课堂字幕。';}catch(e){$('trial-status').textContent=e.message;}finally{materialBusy=false;controls(mode);$('trial-run').disabled=false;$('trial-close').disabled=false;$('trial-input').disabled=false;}
 };
 const initialEmpty=$('transcript').innerHTML;
-$('new-class').onclick=()=>{if(!materialLocked())blank();};$('start').onclick=begin;$('pause').onclick=pauseRecording;$('finish').onclick=finish;
+$('new-class').onclick=()=>{if(!materialLocked())blank();};$('start').onclick=begin;$('pause').onclick=()=>pauseRecording();$('finish').onclick=finish;
 let accessBusy=false;
 function renderAccess(){
  $('setup-hint').hidden=config.hasKey;$('member-use').hidden=!config.member;$('settings-account').hidden=!!profileUser;
@@ -295,14 +299,14 @@ $('settings-form').onsubmit=async e=>{e.preventDefault();if(accessBusy||material
 $('member-use').onclick=async()=>{if(accessBusy||materialLocked())return;lockAccess(true);try{config=await useMembership();renderAccess();if(config.hasKey)$('settings').close();}catch(e){$('settings-error').textContent=e.message;}finally{lockAccess(false);}};
 $('settings-account').onclick=()=>{if(accessBusy)return;$('settings').close();showProfile();};
 $('demo').onclick=async()=>{try{current=await api('/api/sessions',{method:'POST',body:JSON.stringify({demo:true})});selectedLanguage='en';controls('ended');render();$('start').hidden=true;notice('这是演示课堂：使用示例字幕与笔记，不采集麦克风，不调用 API。');await history();}catch(e){notice(e.message);}};
-async function openHistory(id){if(!id)return;if(translationModeBusy||accountBusy||materialBusy||languageBusy||['recording','paused','connecting','finishing'].includes(mode)){notice('请先完成当前操作或结束课堂，再打开其他记录。');return;}try{showClassroom();current=await api('/api/sessions/'+id);selectedLanguage=language(current.sourceLanguage).code;$('transcript').innerHTML=initialEmpty;transcriptFollow.reset();controls(current.status==='ready'?'idle':'ended');elapsed=0;notice('');render();if(current.demo)$('start').hidden=true;await history();}catch(e){notice(e.message);}};
+async function openHistory(id){if(!id)return;if(translationModeBusy||accountBusy||materialBusy||languageBusy||['recording','paused','connecting','reconnecting','finishing'].includes(mode)){notice('请先完成当前操作或结束课堂，再打开其他记录。');return;}try{showClassroom();current=await api('/api/sessions/'+id);selectedLanguage=language(current.sourceLanguage).code;$('transcript').innerHTML=initialEmpty;transcriptFollow.reset();controls(current.status==='ready'?'idle':'ended');elapsed=0;notice('');render();if(current.demo)$('start').hidden=true;await history();}catch(e){notice(e.message);}};
 let historyActionBusy=false;
 function confirmCourseDelete(title){const dialog=$('course-delete-dialog');$('course-delete-name').textContent=title;dialog.returnValue='cancel';return new Promise(resolve=>{dialog.addEventListener('close',()=>resolve(dialog.returnValue==='delete'),{once:true});dialog.showModal();});}
 $('history').onclick=async e=>{
  const button=e.target.closest('[data-history-action]'),row=button?.closest('[data-id]');if(!row||historyActionBusy)return;
  const id=row.dataset.id,action=button.dataset.historyAction;
  if(action==='open'){await openHistory(id);return;}
- if(action==='delete'&&(materialBusy||languageBusy||(current?.id===id&&['recording','paused','connecting','finishing'].includes(mode)))){notice('请先完成当前操作或结束课堂，再删除。');return;}
+ if(action==='delete'&&(materialBusy||languageBusy||(current?.id===id&&['recording','paused','connecting','reconnecting','finishing'].includes(mode)))){notice('请先完成当前操作或结束课堂，再删除。');return;}
  if(action==='delete'&&!await confirmCourseDelete(row.querySelector('strong').textContent))return;
  historyActionBusy=true;button.disabled=true;
  try{
@@ -314,8 +318,23 @@ $('history').onclick=async e=>{
 $('history-select').onchange=e=>openHistory(e.target.value);
 $('retry-summary').onclick=async()=>{if(!current)return;if(!current.demo&&!config.paidMember){notice('课堂总结需要普通会员或金会员。新账号免费体验包含 1 小时翻译，不含课堂总结；可在个人中心开通会员。');return;}if(!config.hasKey&&(!current.demo||current.materials?.length)){$('settings').showModal();return;}controls('finishing');notice('正在整理课堂笔记…');try{current=await api(`/api/sessions/${current.id}/summary`,{method:'POST'});controls('ended');render();if(current.demo)$('start').hidden=true;await summaryReady();}catch(e){controls('ended');render();notice(e.message);}};
 $('export-pdf').onclick=()=>download('pdf-summary');$('export-transcript-pdf').onclick=()=>download('pdf-transcript');$('export-md').onclick=()=>download('md');$('export-html').onclick=()=>download('html');
-window.addEventListener('beforeunload',e=>{if(translationModeBusy||accountBusy||materialBusy||languageBusy||['recording','paused','connecting','finishing'].includes(mode)){e.preventDefault();e.returnValue='';}});
-document.addEventListener('visibilitychange',async()=>{if(document.visibilityState==='visible'&&mode==='recording')try{wakeLock=await navigator.wakeLock?.request('screen');}catch{}});
+window.addEventListener('beforeunload',e=>{if(translationModeBusy||accountBusy||materialBusy||languageBusy||['recording','paused','connecting','reconnecting','finishing'].includes(mode)){e.preventDefault();e.returnValue='';}});
+async function restoreRecording(){
+ if(!ws)return;
+ if(resumeAfterSystemInterruption&&mode==='paused'){
+  resumeAfterSystemInterruption=false;await pauseRecording();return;
+ }
+ if(!['recording','reconnecting'].includes(mode))return;
+ try{if(context&&context.state!=='running')await context.resume();ws.verifyConnection();}
+ catch{await pauseRecording();notice('浏览器暂时无法恢复麦克风，请点击继续录音。');return;}
+ if(document.visibilityState==='visible')try{wakeLock=await navigator.wakeLock?.request('screen');}catch{}
+}
+initRecordingLifecycle({active:()=>!!ws&&['recording','paused','connecting','reconnecting','finishing'].includes(mode),persist:()=>ws?.persist(),recover:restoreRecording,exit:()=>{
+ if(mode==='recording')elapsed+=Date.now()-startedAt;
+ closeFailedConnection(ws);ws=null;controls('idle');void releaseAudio().catch(()=>{});
+ try{navigator.sendBeacon?.('/api/openai/recording/release',new Blob([JSON.stringify({owner:recordingOwner})],{type:'application/json'}));}catch{}
+}});
+window.addEventListener('offline',()=>{if(['recording','reconnecting'].includes(mode))void ws?.recoverConnection('网络已离线，恢复网络后会自动重连。');});
 async function loadTranslationModePreference(){
  $('translation-mode-options').disabled=true;$('translation-mode-save').disabled=true;
  try{preferredTranslationMode=await getTranslationModePreference();document.querySelectorAll('input[name="translationMode"]').forEach(input=>input.checked=input.value===preferredTranslationMode);updateTranslationModeLabel();$('translation-mode-status').hidden=true;$('translation-mode-options').disabled=false;$('translation-mode-save').disabled=false;}
@@ -436,14 +455,6 @@ $('password-switch').onclick=()=>{
 };
 for(const id of ['login-username','login-password','password-confirm'])$(id).addEventListener('input',()=>{if(registrationEditable())cancelRegistration('内容已更改，请重新提交注册。');else if(registrationFailed){registrationFailed=false;updatePasswordControls();}});
 window.addEventListener('pagehide',()=>cancelRegistration());
-window.addEventListener('pagehide',()=>{
- if(!ws||!['recording','paused','connecting','finishing'].includes(mode))return;
- if(mode==='recording')elapsed+=Date.now()-startedAt;
- closeFailedConnection(ws);ws=null;controls('idle');
- void releaseAudio().catch(()=>{});
- notice('离开页面后录音已停止，返回后可点击继续这节课重新连接。');
- try{navigator.sendBeacon?.('/api/openai/recording/release',new Blob([JSON.stringify({owner:recordingOwner})],{type:'application/json'}));}catch{}
-});
 window.addEventListener('popstate',()=>cancelRegistration());
 $('password-form').onsubmit=async event=>{
  event.preventDefault();if(materialLocked()||!passwordEnabled)return;

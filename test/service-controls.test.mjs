@@ -136,6 +136,7 @@ test('relay freezes server settings, filters provider secrets, stops blocked acc
  const malicious={type:'session.update',session:{type:'realtime',audio:{input:{transcription:{model:'gpt-transcribe',languages:['en']},format:{type:'audio/pcmu'},turn_detection:{type:'server_vad'}}},tools:[{type:'function',name:'arbitrary'}]}};
  server.fire('message',malicious);await tick();assert.equal(upstream.sent[0].session.type,'transcription');assert.equal(upstream.sent[0].session.audio.input.format.rate,24000);assert.equal(upstream.sent[0].session.tools,undefined);
  upstream.fire('message',{type:'session.updated',session:{client_secret:f.env.OPENAI_API_KEY}});await tick();assert.deepEqual(server.sent[0],{type:'session.updated'});
+ server.fire('message',{type:'connection.ping'});await tick();assert.deepEqual(server.sent.at(-1),{type:'connection.pong'});assert.equal(upstream.sent.length,1,'heartbeat must never call or bill the provider');
  await f.admin('/api/admin/costs/restrict',{accountId:f.account.id,until:Date.now()+60000,expectedUntil:0,reason:'manual block during recording'});
  server.fire('message',{type:'input_audio_buffer.append',audio:Buffer.alloc(4800).toString('base64')});server.fire('message',{type:'input_audio_buffer.commit'});
  for(let i=0;i<10&&server.readyState!==3;i++)await tick();assert.equal(upstream.sent.length,1);assert.equal(server.readyState,3);assert.equal(upstream.readyState,3);

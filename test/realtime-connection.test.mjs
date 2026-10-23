@@ -7,6 +7,18 @@ import {memberHandle} from './access-fixture.mjs';
 import {req} from './server-fixture.mjs';
 import {TRANSLATION_INSTRUCTIONS} from '../src/translation-prompt.js';
 
+test('successful WebSocket upgrade cancels the handshake deadline and stays alive beyond 20 seconds',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let signal,closed=false;
+ await openTranscription({OPENAI_API_KEY:'test-secret'},async(url,init)=>{signal=init.signal;signal.addEventListener('abort',()=>{closed=true;});return {webSocket:{accept(){}}};});
+ t.mock.timers.tick(65000);assert.equal(signal.aborted,false);assert.equal(closed,false);
+});
+test('an actual handshake stall still aborts after 20 seconds',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let aborted=false;
+ const pending=openTranscription({OPENAI_API_KEY:'test-secret'},async(url,init)=>new Promise((resolve,reject)=>init.signal.addEventListener('abort',()=>{aborted=true;reject(new Error('Handshake timed out'));})));
+ const result=assert.rejects(pending,e=>e.diagnostic.code==='upstream_transport');
+ t.mock.timers.tick(20000);await result;assert.equal(aborted,true);
+});
+
 test('no-audio diagnostic closes a successfully upgraded upstream without sending audio',async()=>{
  let accepted=false,closed=false;const listeners={};
  const result=await checkRealtimeConnection({OPENAI_API_KEY:'test-secret'},async(url,init)=>{

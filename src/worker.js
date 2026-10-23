@@ -81,7 +81,9 @@ export async function handle(request,upstream=fetch,env={},runtime={}){
    await requireMemberAdmin(request,env);await securityRate(request,env,'admin','',60);
    if(url.pathname==='/api/admin/realtime/check'&&request.method==='POST'){
     await consume(env,'admin-realtime-check',3,60);
-    return reply(await checkRealtimeConnection(env,upstream));
+    const data=request.headers.get('Content-Type')?.startsWith('application/json')?await readJson(request,1024):{};
+    const holdMs=data.holdMs??0;if(!Number.isSafeInteger(holdMs)||holdMs<0||holdMs>60000)throw new MemberError('连接检查时长无效，最长 60 秒。',400);
+    return reply(await checkRealtimeConnection(env,upstream,{holdMs}));
    }
    if(url.pathname==='/api/admin/payments'||url.pathname.startsWith('/api/admin/payments/'))return reply(await adminPayments(request,env,url.pathname,request.method==='POST'?await readJson(request,4096):undefined,upstream));
    if(url.pathname==='/api/admin/history/check'&&request.method==='GET')return reply(await checkAdminHistory(env,url.searchParams.get('username'),url.searchParams.get('classId')));
@@ -130,8 +132,8 @@ export async function handle(request,upstream=fetch,env={},runtime={}){
    const availability=await realtimeAvailability(request,env);if(!availability.available)return reply(availability);
    const usage=await myUsage(request,env);
    if(usage.minutes!==null&&usage.remainingMinutes<=0)return reply({available:false,code:'translation_quota_exhausted',message:usage.tier==='trial'?'1 小时免费翻译已用完，请开通会员继续。':'本期 30 小时翻译额度已用完，请等待下期重置或联系客服。'});
-   if(usage.paused)return reply({available:false,message:'本站已暂停新增 AI 消耗，请稍后再试。'});
-   if(usage.restrictedUntil>Date.now())return reply({available:false,message:'账号服务暂时受限，请在个人中心查看。'});
+   if(usage.paused)return reply({available:false,code:'service_paused',message:'本站已暂停新增 AI 消耗，请稍后再试。'});
+   if(usage.restrictedUntil>Date.now())return reply({available:false,code:'account_restricted',message:'账号服务暂时受限，请在个人中心查看。'});
    return reply(await recordingAvailability(request,env));
   }
   if(!['/api/openai/responses','/api/openai/token'].includes(url.pathname))return reply({error:{message:'Not found'}},404);

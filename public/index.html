@@ -8,6 +8,7 @@
 <div id="message" class="message" role="status" hidden></div>
 
 <section class="control-bar" aria-label="录音控制"><div class="record-status"><span id="status-dot" class="status-dot"></span><div><strong id="status">准备就绪</strong><small id="status-detail">优先使用本机麦克风 · 自动识别 → 中文</small></div></div><label class="language-control" for="source-language"><span>翻译语言</span><select id="source-language" aria-label="翻译语言"></select></label><div class="meter" aria-label="麦克风音量"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span id="timer" class="timer">00:00:00</span><div class="control-actions"><button id="pause" hidden>Ⅱ 暂停</button><button id="start" class="primary"><span>●</span> 开始上课</button><button id="finish" class="finish" hidden>■ 结束并总结</button></div></section>
+<p class="recording-continuity">切换标签或应用时尽量保持录音；若系统中断，返回后自动检查并尝试恢复。刷新或关闭页面会结束当前连接。</p>
 <div class="content-grid"><div class="classroom-column"><section class="materials-panel" aria-label="本节课资料">
 <div class="materials-heading"><div><h2>本节课资料 <span id="material-count" class="badge">0 份</span></h2><p>导入课件与阅读材料，让译文中的术语更准确。</p></div><button id="try-open" class="text-button">✧ 试译与总结</button></div>
 <div id="material-drop" class="material-drop"><span>＋</span><div><strong>拖入 PPT 或资料</strong><small>PPTX / PDF / DOCX / TXT / Markdown · 每份 ≤ 20 MB</small></div><button id="material-add">选择文件</button><input id="material-files" type="file" accept=".pptx,.pdf,.docx,.txt,.md,.markdown,.ppt,.doc" multiple hidden></div>

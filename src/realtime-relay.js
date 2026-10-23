@@ -85,14 +85,14 @@ export async function realtimeRelay(request,env,upstream,runtime={}){
   console.warn('realtime_connection_failed',JSON.stringify({code:error.diagnostic?.code,status:error.diagnostic?.status}));await releaseLease(env,lease);
   // Browsers cannot read an HTTP error body from a rejected WebSocket upgrade.
   // Once account checks passed, deliver only our safe error over the socket.
-  return rejectedSocket(runtime,{message:error instanceof MemberError?error.message:'网站服务器暂时无法连接语音服务，请稍后重试。'});
+  return rejectedSocket(runtime,{message:error instanceof MemberError?error.message:'网站服务器暂时无法连接语音服务，请稍后重试。',code:error.diagnostic?.code});
  }
  const pair=runtime.pairFactory?runtime.pairFactory():new WebSocketPair(),client=pair[0],server=pair[1];server.accept();
  let closed=false,queue=Promise.resolve(),queued=0,eventQueue=Promise.resolve(),timer,configured=false;
  const emit=event=>{if(!closed&&server.readyState===1)server.send(JSON.stringify(event));};
  const audio=new MeteredAudio(request,env,lease,event=>socket.send(JSON.stringify(event)),emit);
- const close=(message)=>{const task=(async()=>{
-  if(closed)return;emit({type:'error',error:{message:message||'语音连接已结束，请重新连接。'}});closed=true;clearInterval(timer);
+ const close=(message,retryable=false)=>{const task=(async()=>{
+  if(closed)return;emit({type:'error',error:{message:message||'语音连接已结束，请重新连接。',retryable}});closed=true;clearInterval(timer);
   try{socket.close(1000,'closed');}catch{}try{server.close(1000,'closed');}catch{}
   await queue.catch(()=>{});await eventQueue.catch(()=>{});await audio.close();
  })();runtime.waitUntil?.(task.catch(()=>console.warn('realtime_cleanup_failed')));return task;};
@@ -102,7 +102,8 @@ export async function realtimeRelay(request,env,upstream,runtime={}){
    if(closed)return;const data=JSON.parse(event.data);
    if(data.type==='session.update'){
     socket.send(JSON.stringify(safeSession(data,title,mode)));configured=true;
-   }else if(data.type==='input_audio_buffer.append'&&configured)await audio.append(data.audio);
+   }else if(data.type==='connection.ping'&&configured)emit({type:'connection.pong'});
+   else if(data.type==='input_audio_buffer.append'&&configured)await audio.append(data.audio);
    else if(data.type==='input_audio_buffer.commit'&&configured)await audio.commit();
    else throw new MemberError('不支持的语音请求。',400);
   }).catch(error=>{if(error instanceof MemberError&&error.abuse===true)void restrictAbuse(env,lease.accountId,'语音积压或发送速度异常').catch(()=>{});void close(error instanceof MemberError?error.message:'实时服务暂不可用，请重新连接。');}).finally(()=>queued--);
@@ -110,7 +111,7 @@ export async function realtimeRelay(request,env,upstream,runtime={}){
  socket.addEventListener('message',event=>{
   eventQueue=eventQueue.then(()=>audio.event(JSON.parse(event.data))).catch(()=>{void close('识别结果处理失败，未完成额度会自动返还。');});
  });
- socket.addEventListener('close',()=>{void close();});socket.addEventListener('error',()=>{void close('语音服务连接失败。');});
+ socket.addEventListener('close',()=>{void close(undefined,true);});socket.addEventListener('error',()=>{void close('语音服务连接中断，正在尝试恢复。',true);});
  server.addEventListener('close',()=>{void close();});server.addEventListener('error',()=>{void close();});
  let checking=false;
  timer=setInterval(async()=>{
