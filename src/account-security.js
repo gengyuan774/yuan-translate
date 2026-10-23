@@ -16,7 +16,8 @@ export async function accountSecurityInfo(env,user){
  return {emailReady:recoveryReady(env),verifiedEmail:email?email.email[0]+'***@'+email.email.split('@')[1]:null};
 }
 async function replacePassword(env,id,version,newPassword,action){
- const next=await hashPassword(validPassword(newPassword)),auditId=crypto.randomUUID();
+ const username=await env.DB.prepare('SELECT username FROM account_passwords WHERE account_id=?').bind(id).first();
+ const next=await hashPassword(validPassword(newPassword,username?.username)),auditId=crypto.randomUUID();
  await env.DB.batch([
   env.DB.prepare("INSERT INTO security_audit (id,subject,actor,action,details,created_at) SELECT ?,?,'account',?,'{}',? FROM account_security WHERE account_id=? AND version=? AND status='active'").bind(auditId,await digest('audit:'+id),action,Date.now(),id,version),
   env.DB.prepare("UPDATE account_passwords SET password_hash=? WHERE account_id=? AND EXISTS (SELECT 1 FROM account_security WHERE account_id=? AND version=? AND status='active')").bind(next,id,id,version),
@@ -66,6 +67,7 @@ export async function finishRecovery(request,env,data,purpose){
  if(!row||row.code_hash!==await digest(data.challengeId+':'+data.code))throw new MemberError('验证码无效或已过期',400);
  if(purpose==='bind'){const user=await requireAccount(request,env);if(user.id!==row.account_id)throw new MemberError('验证码无效或已过期',400);}
  const state=await securityState(env,row.account_id);if(state.status!=='active'||state.version!==row.version)throw new MemberError('验证码无效或已过期',400);
+ if(purpose==='reset'){const username=await env.DB.prepare('SELECT username FROM account_passwords WHERE account_id=?').bind(row.account_id).first();validPassword(data.newPassword,username?.username);}
  // Claim once before doing any mutation. A database failure requires a fresh challenge.
  const claimed=await env.DB.prepare('DELETE FROM recovery_challenges WHERE id=? AND expires_at>? RETURNING id').bind(row.id,Date.now()).first();if(!claimed)throw new MemberError('验证码已使用',400);
  if(purpose==='reset')return replacePassword(env,row.account_id,row.version,data.newPassword,'password_reset');

@@ -1,3 +1,4 @@
+import {preserveGrantedTrialClaim} from './trial-grant.js';
 import {MemberError} from './errors.js';
 import {requireAccount} from './account-server.js';
 import {reauthenticate} from './account-security.js';
@@ -72,6 +73,7 @@ export async function resumeDeletion(request,env,data,admin=false){
  if(objects.objects.length)return {status:'pending',retryAfter:1};
  const id=row.account_id,subject=await digest('audit:'+id),statements=[];
  statements.push(env.DB.prepare("INSERT INTO security_audit (id,subject,actor,action,details,created_at) SELECT ?,?,?,'deletion_completed','{}',? FROM deletion_jobs WHERE id=? AND status='pending'").bind(crypto.randomUUID(),subject,admin?'admin':'account',Date.now(),row.id));
+ const trialClaim=await preserveGrantedTrialClaim(env,id);if(trialClaim)statements.push(trialClaim);
  for(const table of ['service_summary_jobs','plan_balances','account_trials','service_periods','service_accounts','account_materials','account_classes','account_sessions','account_passwords','account_memberships','member_redemptions','membership_admin_audit','recovery_emails','recovery_challenges','account_security'])statements.push(env.DB.prepare(`DELETE FROM ${table} WHERE account_id=?`).bind(id));
  statements.push(env.DB.prepare("UPDATE security_audit SET details='{}' WHERE subject=?").bind(subject));
  statements.push(env.DB.prepare('DELETE FROM accounts WHERE id=?').bind(id));

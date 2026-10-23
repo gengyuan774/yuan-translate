@@ -1,8 +1,10 @@
 import {scryptAsync} from '@noble/hashes/scrypt.js';
 import {MemberError} from './errors.js';
-import {consume} from './member.js';
 import {issueAccountSession} from './account-server.js';
 import {securityState,auditStatement} from './security-common.js';
+import {newPasswordError} from './password-policy.js';
+import {authRate,consumeRegistrationChallenge,registrationUsername} from './registration-security.js';
+import {trialGrantStatements} from './trial-grant.js';
 const encode=new TextEncoder(),hex=bytes=>Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
 const digest=async value=>hex(new Uint8Array(await crypto.subtle.digest('SHA-256',encode.encode(value))));
 const scheme='scrypt-16384-8-5-v1';
@@ -17,19 +19,15 @@ export async function verifyPassword(password,stored){
  const actual=await derive(password,valid?parts[1]:'00000000000000000000000000000000'),expected=valid?parts[2]:'0'.repeat(64);
  let diff=0;for(let i=0;i<64;i++)diff|=actual.charCodeAt(i)^expected.charCodeAt(i);return valid&&diff===0;
 }
-function credentials(data){
- const username=typeof data.username==='string'?data.username.trim().toLowerCase():'';
- if(!/^[a-z0-9_][a-z0-9_.-]{3,31}$/.test(username))throw new MemberError('账号需为 4–32 位英文字母、数字、下划线、点或短横线，不能以点或短横线开头。',400);
+function credentials(data,register){
+ const username=registrationUsername(data.username);
  if(typeof data.password!=='string'||data.password.length<8||data.password.length>128)throw new MemberError('密码需为 8–128 位，区分大小写。',400);
+ if(register){const message=newPasswordError(data.password,username);if(message)throw new MemberError(message,400);}
  return {username,password:data.password};
 }
-async function rate(request,env,username,register){
- if(!env.DB)throw new MemberError('账户服务暂不可用，请稍后重试。');
- const ip=await digest(request.headers.get('CF-Connecting-IP')||'unknown');
- try{await consume(env,'password-global',200,600);await consume(env,'password-ip:'+ip,20,600);await consume(env,'password-user:'+await digest(username),10,600);if(register)await consume(env,'register-ip:'+ip,5,3600);}catch(e){if(e.status===429)throw new MemberError('注册或登录尝试过于频繁，请稍后再试。',429);throw e;}
-}
 export async function passwordAccount(request,env,data,register=false){
- const {username,password}=credentials(data);await rate(request,env,username,register);
+ const {username,password}=credentials(data,register);await authRate(request,env,register?'register':'login',username);
+ if(register)await consumeRegistrationChallenge(request,env,username,data.registration,data.website);
  const existing=await env.DB.prepare('SELECT p.password_hash, a.id, a.provider, a.label, COALESCE(s.version,0) AS securityVersion FROM account_passwords p JOIN accounts a ON a.id = p.account_id LEFT JOIN account_security s ON s.account_id=a.id WHERE p.username = ?').bind(username).first();
  if(!register){
   const state=existing?await securityState(env,existing.id):null;
@@ -37,11 +35,11 @@ export async function passwordAccount(request,env,data,register=false){
   const result=await issueAccountSession(env,{id:existing.id,provider:existing.provider,label:existing.label,securityVersion:existing.securityVersion});await (await auditStatement(env,existing.id,'account','login')).run();return result;
  }
  if(existing)throw new MemberError('这个账号已注册，请直接登录或换一个账号。',409);
- const id=crypto.randomUUID(),now=Date.now(),passwordHash=await hashPassword(password);
+ const id=crypto.randomUUID(),now=Date.now(),subjectHash=await digest('password:'+username),passwordHash=await hashPassword(password);
  try{await env.DB.batch([
-  env.DB.prepare('INSERT INTO accounts (id, provider, subject_hash, label, created_at) VALUES (?, ?, ?, ?, ?)').bind(id,'password',await digest('password:'+username),username,now),
+  env.DB.prepare('INSERT INTO accounts (id, provider, subject_hash, label, created_at) VALUES (?, ?, ?, ?, ?)').bind(id,'password',subjectHash,username,now),
   env.DB.prepare('INSERT INTO account_passwords (username, account_id, password_hash, created_at) VALUES (?, ?, ?, ?)').bind(username,id,passwordHash,now),
-  env.DB.prepare('INSERT INTO account_trials (account_id, granted_at) VALUES (?, ?)').bind(id,now)
+  ...await trialGrantStatements(env,{accountId:id,provider:'password',subjectHash,createdAt:now})
  ]);}catch(e){if(await env.DB.prepare('SELECT username FROM account_passwords WHERE username = ?').bind(username).first())throw new MemberError('这个账号已注册，请直接登录或换一个账号。',409);throw e;}
  const result=await issueAccountSession(env,{id,provider:'password',label:username});await (await auditStatement(env,id,'account','registered')).run();return result;
 }

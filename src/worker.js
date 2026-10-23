@@ -1,3 +1,4 @@
+import {createRegistrationChallenge} from './registration-security.js';
 import {verifyTrialTranslation} from './audio-proof.js';
 import {summarizeService} from './summary-service.js';
 import {TRANSLATION_INSTRUCTIONS} from './translation-prompt.js';
@@ -88,6 +89,7 @@ export async function handle(request,upstream=fetch,env={}){
   if(url.pathname==='/api/account/delete'&&request.method==='POST')return reply(await startDeletion(request,env,await readJson(request,4096)));
   if(url.pathname==='/api/account/deletion/resume'&&request.method==='POST')return reply(await resumeDeletion(request,env,await readJson(request,4096)));
   if(url.pathname==='/api/account'&&request.method==='GET'){const user=await enrichUser(env,await accountUser(request,env));return reply({user,methods:{password:!!env.DB,phone:phoneReady(env),email:false,wechat:false}});}
+  if(url.pathname==='/api/account/register/challenge'&&request.method==='POST'){const result=await createRegistrationChallenge(request,env,await readJson(request,4096));return reply(result.data,200,{'Set-Cookie':result.cookie});}
   if(['/api/account/register/password','/api/account/login/password'].includes(url.pathname)&&request.method==='POST'){const result=await passwordAccount(request,env,await readJson(request,4096),url.pathname.includes('/register/'));await enrichUser(env,result.user);return reply({user:result.user},200,{'Set-Cookie':result.cookie});}
   if(url.pathname==='/api/account/phone/send'&&request.method==='POST')return reply(await sendPhoneCode(request,env,await readJson(request,4096),upstream));
   if(url.pathname==='/api/account/login/phone'&&request.method==='POST'){const result=await verifyPhoneCode(request,env,await readJson(request,4096),upstream);await enrichUser(env,result.user);return reply({user:result.user},200,{'Set-Cookie':result.cookie});}

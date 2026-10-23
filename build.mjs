@@ -7,6 +7,7 @@ await build({entryPoints:['src/recover.js'],outfile:'dist/client/recover.js',ext
 await build({entryPoints:['src/membership.js'],outfile:'dist/client/membership.js',bundle:true,format:'esm',platform:'browser',target:'es2022',minify:true,legalComments:'none'});
 await build({entryPoints:['src/pdf-export.js'],outfile:'dist/client/pdf-export.js',bundle:true,format:'esm',platform:'browser',target:'es2022',minify:true,legalComments:'none'});
 await build({entryPoints:['src/parser-worker.js'],outfile:'dist/client/parser-worker.js',bundle:true,format:'esm',platform:'browser',target:'es2022',minify:true,legalComments:'none'});
+await build({entryPoints:['src/registration-proof-worker.js'],outfile:'dist/client/registration-proof-worker.js',bundle:true,format:'esm',platform:'browser',target:'es2022',minify:true,legalComments:'none'});
 await copyFile('node_modules/pdfjs-dist/build/pdf.worker.min.mjs','dist/client/pdf.worker.min.mjs');
 for(const name of ['usage','admin-usage'])await build({entryPoints:['src/'+name+'.js'],outfile:'dist/client/'+name+'.js',bundle:true,format:'esm',platform:'browser',target:'es2022',minify:true,legalComments:'none'});
 const assets={};for(const name of await readdir('dist/client')){

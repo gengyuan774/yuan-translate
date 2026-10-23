@@ -1,11 +1,23 @@
 import {accountId,exportLocalAccount,clearLocalAccount} from './storage.js';
+import {NEW_PASSWORD_MIN,MAX_PASSWORD,newPasswordError} from './password-policy.js';
 const $=id=>document.getElementById(id),receiptKey='classroom-deletion-receipt';
 async function call(path,body){const r=await fetch(path,{method:body?'POST':'GET',credentials:'same-origin',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,cache:'no-store'});const data=await r.json();if(!r.ok){const error=new Error(data.error?.message||'操作失败，请重试');error.status=r.status;throw error;}return data;}
 const fields=form=>Object.fromEntries(new FormData(form));
 function saveFile(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
+function initPasswordVisibility(){
+ let index=0;
+ for(const input of document.querySelectorAll('#change-password-form input[type="password"],#reset-verify-form input[type="password"]')){
+  if(!input.id)input.id='security-password-'+(++index);
+  const wrapper=document.createElement('span'),button=document.createElement('button');wrapper.className='password-control';button.type='button';button.className='password-visibility';button.dataset.togglePassword=input.id;button.textContent='显示';button.setAttribute('aria-label','显示密码');button.setAttribute('aria-pressed','false');input.before(wrapper);wrapper.append(input,button);
+ }
+ for(const button of document.querySelectorAll('[data-toggle-password]'))button.addEventListener('click',()=>{const input=$(button.dataset.togglePassword);if(!input)return;const visible=input.type==='password';input.type=visible?'text':'password';button.textContent=visible?'隐藏':'显示';button.setAttribute('aria-label',visible?'隐藏密码':'显示密码');button.setAttribute('aria-pressed',String(visible));});
+}
 export function initAccountSecurity({locked,showMessage,setBusy}){
- let emailEnabled=false,busy=false,resetId='',bindId='',deleting=false,refreshVersion=0;
+ initPasswordVisibility();
+ for(const input of document.querySelectorAll('#change-password-form [name="newPassword"],#change-password-form [name="confirmation"],#reset-verify-form [name="newPassword"],#reset-verify-form [name="confirmation"]')){input.minLength=NEW_PASSWORD_MIN;input.maxLength=MAX_PASSWORD;}
+ let emailEnabled=false,busy=false,resetId='',resetUsername='',accountUsername='',bindId='',deleting=false,refreshVersion=0;
  async function refresh(user){const version=++refreshVersion;emailEnabled=false;$('account-security-panel').hidden=!user||user.provider!=='password';$('account-data-panel').hidden=!user||user.provider!=='password';
+  accountUsername=user?.provider==='password'?user.label||'':'';
   $('recovery-open').hidden=true;$('recovery-bind').hidden=true;$('recovery-reset').hidden=true;
   $('login-method-note').textContent='当前仅支持账号密码登录。正在确认密码恢复方式…';
   $('recovery-availability').textContent='正在确认密码恢复方式…';
@@ -22,14 +34,14 @@ export function initAccountSecurity({locked,showMessage,setBusy}){
    $('recovery-availability').textContent='密码恢复方式暂时无法确认，请稍后重新打开个人中心。';
   }
  }
- window.addEventListener('account-render',e=>{resetId='';bindId='';$('reset-verify-form').hidden=true;$('bind-verify-form').hidden=true;refresh(e.detail);});
- async function run(form,operation){if(busy||locked())return;busy=true;setBusy(true);const buttons=Array.from(form.querySelectorAll('button'));buttons.forEach(b=>b.disabled=true);showMessage('正在处理…');try{await operation(fields(form));form.querySelectorAll('input[type="password"]').forEach(i=>i.value='');}catch(e){showMessage(e.message);}finally{busy=false;setBusy(false);buttons.forEach(b=>b.disabled=false);}}
- $('change-password-form').onsubmit=e=>{e.preventDefault();run(e.currentTarget,async data=>{if(data.newPassword!==data.confirmation)throw new Error('两次新密码不一致');await call('/api/account/password/change',data);location.assign('/profile?login=1&passwordChanged=1&next=security');});};
+ window.addEventListener('account-render',e=>{resetId='';resetUsername='';bindId='';$('reset-verify-form').hidden=true;$('bind-verify-form').hidden=true;refresh(e.detail);});
+ async function run(form,operation){if(busy||locked())return;busy=true;setBusy(true);const buttons=Array.from(form.querySelectorAll('button'));buttons.forEach(b=>b.disabled=true);showMessage('正在处理…');try{await operation(fields(form));form.querySelectorAll('input[autocomplete="current-password"],input[autocomplete="new-password"]').forEach(i=>i.value='');}catch(e){showMessage(e.message);}finally{busy=false;setBusy(false);buttons.forEach(b=>b.disabled=false);}}
+ $('change-password-form').onsubmit=e=>{e.preventDefault();run(e.currentTarget,async data=>{const error=newPasswordError(data.newPassword,accountUsername);if(error)throw new Error(error);if(data.newPassword!==data.confirmation)throw new Error('两次新密码不一致');await call('/api/account/password/change',data);location.assign('/profile?login=1&passwordChanged=1&next=security');});};
  $('recovery-open').onclick=()=>{$('recovery-reset').hidden=!$('recovery-reset').hidden;};
  for(const purpose of ['reset','bind']){
   const send=$(purpose+'-send-form'),verify=$(purpose+'-verify-form');let retryAt=0;
-  send.onsubmit=e=>{e.preventDefault();run(send,async data=>{if(Date.now()<retryAt)throw new Error('请稍后再发送验证码');if(!emailEnabled)throw new Error('恢复服务尚未启用');const result=await call('/api/account/recovery/'+purpose+'/send',data);if(purpose==='reset')resetId=result.challengeId;else bindId=result.challengeId;retryAt=Date.now()+result.retryAfter*1000;verify.hidden=false;showMessage(result.message);});};
-  verify.onsubmit=e=>{e.preventDefault();run(verify,async data=>{if(purpose==='reset'&&data.newPassword!==data.confirmation)throw new Error('两次新密码不一致');await call('/api/account/recovery/'+purpose+'/verify',{...data,challengeId:purpose==='reset'?resetId:bindId});verify.reset();verify.hidden=true;if(purpose==='reset'){resetId='';$('recovery-reset').hidden=true;showMessage('密码已重设，所有旧登录已失效，请使用新密码登录。');}else{bindId='';const info=await call('/api/account/security');$('verified-email').textContent='已验证：'+info.verifiedEmail;$('recovery-availability').textContent='已绑定恢复邮箱。忘记密码时，可在登录页面通过该邮箱验证找回。';showMessage('恢复邮箱已验证并保存。');}});};
+  send.onsubmit=e=>{e.preventDefault();run(send,async data=>{if(Date.now()<retryAt)throw new Error('请稍后再发送验证码');if(!emailEnabled)throw new Error('恢复服务尚未启用');const result=await call('/api/account/recovery/'+purpose+'/send',data);if(purpose==='reset'){resetId=result.challengeId;resetUsername=data.username||'';}else bindId=result.challengeId;retryAt=Date.now()+result.retryAfter*1000;verify.hidden=false;showMessage(result.message);});};
+  verify.onsubmit=e=>{e.preventDefault();run(verify,async data=>{if(purpose==='reset'){const error=newPasswordError(data.newPassword,resetUsername);if(error)throw new Error(error);if(data.newPassword!==data.confirmation)throw new Error('两次新密码不一致');}await call('/api/account/recovery/'+purpose+'/verify',{...data,challengeId:purpose==='reset'?resetId:bindId});verify.reset();verify.hidden=true;if(purpose==='reset'){resetId='';resetUsername='';$('recovery-reset').hidden=true;showMessage('密码已重设，所有旧登录已失效，请使用新密码登录。');}else{bindId='';const info=await call('/api/account/security');$('verified-email').textContent='已验证：'+info.verifiedEmail;$('recovery-availability').textContent='已绑定恢复邮箱。忘记密码时，可在登录页面通过该邮箱验证找回。';showMessage('恢复邮箱已验证并保存。');}});};
  }
  $('account-export-form').onsubmit=e=>{e.preventDefault();run(e.currentTarget,async data=>{
   const id=accountId(),local=await exportLocalAccount(id);const response=await fetch('/api/account/data/export',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});

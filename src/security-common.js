@@ -1,3 +1,4 @@
+import {newPasswordError} from './password-policy.js';
 import {MemberError} from './errors.js';
 import {consume} from './member.js';
 export const digest=async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
@@ -14,4 +15,4 @@ export async function securityRate(request,env,action,id='',count=10){
  try{await consume(env,'security:'+action+':ip:'+ip,count,600);if(id)await consume(env,'security:'+action+':user:'+await digest(id),count,600);}catch(e){if(e.status===429)throw new MemberError('操作过于频繁，请稍后重试',429);throw e;}
 }
 export async function auditStatement(env,id,actor,action,details={}){return env.DB.prepare('INSERT INTO security_audit (id,subject,actor,action,details,created_at) VALUES (?,?,?,?,?,?)').bind(crypto.randomUUID(),await digest('audit:'+id),actor,action,JSON.stringify(details),Date.now());}
-export function validPassword(value){if(typeof value!=='string'||value.length<8||value.length>128)throw new MemberError('密码需为 8–128 位',400);return value;}
+export function validPassword(value,username=''){const error=newPasswordError(value,username);if(error)throw new MemberError(error,400);return value;}

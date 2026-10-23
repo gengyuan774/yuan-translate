@@ -1,0 +1,1 @@
+CREATE INDEX `auth_attempts_retention` ON `auth_attempts` (`created_at`);

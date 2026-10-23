@@ -1,6 +1,8 @@
 import {translationMode} from './models.js';
 import {MAJORS,majorName} from './majors.js';
 import {initAccountSecurity} from './security-ui.js';
+import {RegistrationClient} from './registration-client.js';
+import {NEW_PASSWORD_MIN,MAX_PASSWORD,newPasswordError} from './password-policy.js';
 import {openLocalMicrophone} from './microphone.js';
 import {LANGUAGES,language,direction} from './languages.js';
 import {setAccount,accountId,storageDescription,getMajorPreference,saveMajorPreference,setSessionPinned,sessionSyncPending,getTranslationModePreference,saveTranslationModePreference} from './storage.js';
@@ -24,6 +26,8 @@ let profileView=profileRoute(location.pathname,location.search)||'overview';
 $('source-language').innerHTML=LANGUAGES.map(l=>`<option value="${l.code}">${l.label} → 中文</option>`).join('');
 let translationModeBusy=false,preferredTranslationMode='accurate';
 let majorBusy=false,accountBusy=false,passwordEnabled=false,passwordRegister=false,phoneEnabled=false,phoneChallenge='',phoneRetryAt=0;
+const registrationClient=new RegistrationClient();
+let registrationPending=false,registrationStage='',registrationFailed=false,passwordSubmissionVersion=0;
 let phoneTimer;
 let flushResolver, wakeLock, partials=new Map(), lastEnded=false;
 const escape=s=>String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -333,7 +337,7 @@ function applyAccount(user){
 }
 function profileMessage(text){$('profile-error').textContent=text;$('profile-error').hidden=!text;}
 function renderProfileAccount(){
- $('profile-login').hidden=!!profileUser;$('profile-signed-in').hidden=!profileUser;$('profile-login-title').textContent=profileUser?'我的账户':'未登录';
+ $('profile-login').hidden=!!profileUser;$('profile-signed-in').hidden=!profileUser;$('profile-login-title').textContent=profileUser?'我的账户':passwordRegister?'注册账号':'未登录';
  $('profile-account-label').textContent=profileUser?.label||'';
  renderMembership();updatePhoneControls();window.dispatchEvent(new CustomEvent('account-render',{detail:profileUser}));
  $('profile-history-scope').textContent=profileUser?'当前账户的记录':'当前浏览器的记录';$('sidebar-save-label').textContent=profileUser?'先存本机，定时同步到账户':'记录保存在当前浏览器';
@@ -348,6 +352,7 @@ async function loadAccount(){
  catch(e){profileMessage(e.message);renderProfileAccount();}
 }
 function showClassroom(){
+ if(registrationEditable())cancelRegistration();
  if(translationModeBusy||majorBusy||accountBusy)return;
  $('profile-page').hidden=true;$('classroom-workspace').hidden=false;$('demo').hidden=false;$('profile-open').removeAttribute('aria-current');
  document.title='满绩速翻 · 实时翻译与课堂笔记';
@@ -366,6 +371,7 @@ function renderProfilePage(){
  if(!$('profile-page').hidden){$('breadcrumb-title').textContent=profileView==='overview'?'个人中心':'个人中心 / '+page.title;document.title=page.title+' · 满绩速翻';}
 }
 function showProfile(view='overview',push=true){
+ if(registrationEditable())cancelRegistration();
  if(materialLocked()){notice('请先完成当前操作，再打开个人中心。');return;}
  profileView=Object.hasOwn(PROFILE_PAGES,view)?view:'overview';
  $('profile-page').hidden=false;$('classroom-workspace').hidden=true;$('demo').hidden=true;$('profile-open').setAttribute('aria-current','page');
@@ -403,16 +409,34 @@ function renderMembership(){
 }
 function updatePhoneControls(){updatePasswordControls();}
 async function accountApi(path,body){const response=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error?.message||'账户服务暂不可用');return data;}
-function updatePasswordControls(){for(const id of ['login-username','login-password','password-confirm','password-submit','password-switch'])$(id).disabled=!passwordEnabled||accountBusy;}
+function registrationEditable(){return registrationPending&&registrationStage==='checking';}
+function updatePasswordControls(){
+ const editing=registrationEditable();
+ for(const id of ['login-username','login-password','password-confirm','password-switch'])$(id).disabled=!passwordEnabled||(accountBusy&&!editing);
+ $('password-submit').disabled=!passwordEnabled||accountBusy;
+ $('password-submit').textContent=accountBusy?(registrationPending?(registrationStage==='submitting'?'正在注册…':'安全校验中…'):'正在登录…'):passwordRegister?(registrationFailed?'重试注册':'注册并登录'):'登录';
+ $('password-form').setAttribute('aria-busy',String(accountBusy));
+}
+function cancelRegistration(text=''){
+ if(!registrationPending)return;
+ registrationClient.cancel();passwordSubmissionVersion++;registrationPending=false;registrationStage='';registrationFailed=false;accountBusy=false;updatePasswordControls();controls(mode);profileMessage(text);
+}
 $('password-switch').onclick=()=>{
- if(accountBusy)return;passwordRegister=!passwordRegister;$('password-confirm-field').hidden=!passwordRegister;$('password-confirm').required=passwordRegister;$('password-confirm').value='';$('login-password').value='';$('login-password').autocomplete=passwordRegister?'new-password':'current-password';$('password-submit').textContent=passwordRegister?'注册并登录':'登录';$('password-switch').textContent=passwordRegister?'已有账号？去登录':'没有账号？注册账号';profileMessage('');
+ if(accountBusy&&!registrationEditable())return;cancelRegistration();passwordRegister=!passwordRegister;registrationFailed=false;$('password-confirm-field').hidden=!passwordRegister;$('password-confirm').required=passwordRegister;$('password-confirm').value='';$('login-password').value='';$('login-password').autocomplete=passwordRegister?'new-password':'current-password';$('login-password').minLength=passwordRegister?NEW_PASSWORD_MIN:8;$('login-password').maxLength=MAX_PASSWORD;$('login-password').placeholder=passwordRegister?'至少 15 个字符，建议使用长口令':'8–128 位，区分大小写';$('password-rule').textContent=passwordRegister?'新密码至少 15 个字符，建议使用多个词组成的长口令或密码管理器，避免常见密码与重复字符。':'密码区分大小写，可使用密码管理器填写。';$('registration-notice').hidden=!passwordRegister;$('profile-login-title').textContent=passwordRegister?'注册账号':'未登录';$('password-switch').textContent=passwordRegister?'已有账号？去登录':'没有账号？注册账号';updatePasswordControls();profileMessage('');
 };
+for(const id of ['login-username','login-password','password-confirm'])$(id).addEventListener('input',()=>{if(registrationEditable())cancelRegistration('内容已更改，请重新提交注册。');else if(registrationFailed){registrationFailed=false;updatePasswordControls();}});
+window.addEventListener('pagehide',()=>cancelRegistration());
+window.addEventListener('popstate',()=>cancelRegistration());
 $('password-form').onsubmit=async event=>{
  event.preventDefault();if(materialLocked()||!passwordEnabled)return;
- if(passwordRegister&&$('login-password').value!==$('password-confirm').value){profileMessage('两次输入的密码不一致。');return;}
- const destination=profileLoginDestination(location.search);let signedIn=false;accountBusy=true;updatePasswordControls();profileMessage(passwordRegister?'正在注册…':'正在登录…');
- try{const data=await accountApi('/api/account/'+(passwordRegister?'register':'login')+'/password',{username:$('login-username').value,password:$('login-password').value});$('login-password').value='';$('password-confirm').value='';applyAccount(data.user);config=await refreshAccess();renderAccess();await loadMajorPreference();historyWarning='';blank();renderProfileAccount();await history();profileMessage(passwordRegister?'注册成功，已登录。':'已登录。');signedIn=true;}
- catch(error){profileMessage(error.message);}finally{accountBusy=false;updatePhoneControls();controls(mode);}
+ const registering=passwordRegister,username=$('login-username').value,password=$('login-password').value;
+ if(registering){const error=newPasswordError(password,username);if(error){profileMessage(error);$('login-password').focus();return;}if(password!==$('password-confirm').value){profileMessage('两次输入的密码不一致。');$('password-confirm').focus();return;}}
+ const destination=profileLoginDestination(location.search),version=++passwordSubmissionVersion;let signedIn=false;accountBusy=true;registrationPending=registering;registrationStage=registering?'checking':'';registrationFailed=false;updatePasswordControls();profileMessage(registering?'正在进行注册安全校验，请稍候…':'正在登录…');
+ try{
+  const data=registering?await registrationClient.register({username,password,website:$('registration-website').value,onProgress:stage=>{if(version!==passwordSubmissionVersion)return;registrationStage=stage;updatePasswordControls();profileMessage(stage==='checking'?'正在进行注册安全校验，请稍候…':'安全校验已完成，正在提交注册…');}}):await accountApi('/api/account/login/password',{username,password});
+  if(version!==passwordSubmissionVersion)return;registrationPending=false;registrationStage='';$('login-password').value='';$('password-confirm').value='';applyAccount(data.user);config=await refreshAccess();renderAccess();await loadMajorPreference();historyWarning='';blank();renderProfileAccount();await history();profileMessage(registering?'注册成功，已登录。':'已登录。');signedIn=true;
+ }catch(error){if(version===passwordSubmissionVersion&&error.name!=='AbortError'){registrationFailed=registering;profileMessage(error.message);}}
+ finally{if(version===passwordSubmissionVersion){registrationPending=false;registrationStage='';accountBusy=false;updatePhoneControls();controls(mode);}}
  if(signedIn&&!await reopenPendingClassroom()){
   if(['membership','orders'].includes(destination))window.location.assign(destination==='membership'?'/membership':'/membership/orders');else showProfile(destination);
  }

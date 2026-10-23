@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {environment,req} from './server-fixture.mjs';
 import {createVerifiedAccountSession,issueAccountSession} from '../src/account-server.js';
 import {passwordAccount} from '../src/password-server.js';
+import {mintRegistration} from './registration-fixture.mjs';
 import {loginMember,membershipFor,memberSession,allowSharedRequest} from '../src/member.js';
 import {updateAdminMembership} from '../src/admin-membership.js';
 import {trialFor} from '../src/trial.js';
@@ -12,6 +13,7 @@ import {serviceState,acquireLease,releaseLease,reserve,settle,myUsage,beginSumma
 
 const password='Isolated trial fixture password';
 const cookie=result=>result.cookie.split(';')[0];
+async function passwordRegistration(env,username){const challenge=await mintRegistration(env,username),data={username,password,registration:challenge.registration};return passwordAccount(req('/api/account/register/password',data,challenge.cookie,challenge.headers),env,data,true);}
 
 test('new verified identities receive exactly one trial and repeat sign-in keeps its original grant',async t=>{
  for(const provider of ['email','phone','wechat']){
@@ -43,10 +45,10 @@ test('logging in or issuing sessions for legacy accounts never backfills a new-a
 
 test('password registration grants once, duplicate registration and later login cannot refill it',async t=>{
  const {env,sql}=environment(),now=Date.now();t.mock.method(Date,'now',()=>now);
- const credentials={username:'trialuser',password},request=req('/api/account/register/password',credentials);
- const created=await passwordAccount(request,env,credentials,true);
+ const credentials={username:'trialuser',password};
+ const created=await passwordRegistration(env,credentials.username);
  assert.equal((await trialFor(env,created.user.id)).periodAnchor,now);
- await assert.rejects(passwordAccount(request,env,credentials,true),e=>e.status===409);
+ await assert.rejects(passwordRegistration(env,credentials.username),e=>e.status===409);
  t.mock.method(Date,'now',()=>now+600000);
  const signedIn=await passwordAccount(req('/api/account/login/password',credentials),env,credentials,false);
  assert.equal(signedIn.user.id,created.user.id);
@@ -62,7 +64,7 @@ test('registration and trial rollback together if a trial grant fails',async()=>
  sql.exec("CREATE TRIGGER reject_trial BEFORE INSERT ON account_trials BEGIN SELECT RAISE(ABORT,'synthetic trial failure'); END");
  await assert.rejects(createVerifiedAccountSession(env,{provider:'email',subject:'rollback@example.test'}),/synthetic trial failure/);
  assert.equal(sql.prepare('SELECT COUNT(*) n FROM accounts').get().n,0);
- await assert.rejects(passwordAccount(req('/api/account/register/password'),env,{username:'rollbackuser',password},true),/synthetic trial failure/);
+ await assert.rejects(passwordRegistration(env,'rollbackuser'),/synthetic trial failure/);
  assert.equal(sql.prepare('SELECT COUNT(*) n FROM accounts').get().n,0);
  assert.equal(sql.prepare('SELECT COUNT(*) n FROM account_passwords').get().n,0);
  assert.equal(sql.prepare('SELECT COUNT(*) n FROM account_trials').get().n,0);
@@ -86,7 +88,7 @@ test('paid membership takes priority over the trial and redemption keeps a stabl
 
 test('manual extensions and tier changes preserve the anchor until membership truly expires',async t=>{
  const {env,sql}=environment(),now=Date.now();t.mock.method(Date,'now',()=>now);
- const account=await passwordAccount(req('/api/account/register/password'),env,{username:'manualtrial',password},true),id=account.user.id;
+ const account=await passwordRegistration(env,'manualtrial'),id=account.user.id;
  let updatedAt=sql.prepare('SELECT updated_at FROM account_memberships WHERE account_id=?').get(id).updated_at;
  const update=async(days,tier='regular')=>{
   const result=await updateAdminMembership(env,{username:'manualtrial',accountId:id,tier,expiresAt:new Date(Date.now()+days*86400000).toISOString(),expectedUpdatedAt:updatedAt,reason:'Isolated fixture grant'});

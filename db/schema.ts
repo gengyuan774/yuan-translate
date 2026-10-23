@@ -103,3 +103,13 @@ export const serviceAlerts=sqliteTable('service_alerts',{
 export const serviceAdminSessions=sqliteTable('service_admin_sessions',{
  hash:text('hash').primaryKey(),kind:text('kind').notNull(),expiresAt:integer('expires_at').notNull()
 });
+
+export const registrationChallenges=sqliteTable('registration_challenges',{
+ id:text('id').primaryKey(),nonce:text('nonce').notNull(),networkHash:text('network_hash').notNull(),usernameHash:text('username_hash').notNull(),browserHash:text('browser_hash').notNull(),createdAt:integer('created_at').notNull(),expiresAt:integer('expires_at').notNull(),claimedAt:integer('claimed_at')
+},t=>[index('registration_challenges_expiry').on(t.expiresAt)]);
+export const authAttempts=sqliteTable('auth_attempts',{
+ id:text('id').primaryKey(),action:text('action').notNull(),networkHash:text('network_hash').notNull(),identityHash:text('identity_hash').notNull(),createdAt:integer('created_at').notNull()
+},t=>[index('auth_attempts_network').on(t.action,t.networkHash,t.createdAt),index('auth_attempts_identity').on(t.action,t.identityHash,t.createdAt),index('auth_attempts_time').on(t.action,t.createdAt),index('auth_attempts_retention').on(t.createdAt)]);
+export const trialClaims=sqliteTable('trial_claims',{
+ identityHash:text('identity_hash').primaryKey(),claimToken:text('claim_token').notNull(),claimedAt:integer('claimed_at').notNull()
+});

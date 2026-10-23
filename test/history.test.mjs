@@ -11,7 +11,7 @@ function runtime(){
  for(const file of readdirSync(new URL('../drizzle/',import.meta.url)).filter(f=>f.endsWith('.sql')).sort())sql.exec(readFileSync(new URL('../drizzle/'+file,import.meta.url),'utf8'));
  const DB={prepare(query){return {bind(...args){const st=sql.prepare(query);return {async first(){return st.get(...args)||null;},async all(){return {results:st.all(...args)};},async run(){return st.run(...args);}};}};},async batch(items){for(const item of items)await item.run();}};
  const objects=new Map(),BUCKET={async put(key,value){objects.set(key,value);},async get(key){return objects.has(key)?{async json(){return JSON.parse(objects.get(key));}}:null;},async delete(key){objects.delete(key);}};
- return {sql,objects,env:{DB,BUCKET}};
+ return {sql,objects,env:{DB,BUCKET,TRIAL_CLAIM_SECRET:'synthetic-history-trial-claim-secret-only'}};
 }
 const session=(id=crypto.randomUUID())=>({id,title:'测试课堂',translationMode:'fast',sourceLanguage:'ja',major:{code:'medicine',custom:''},createdAt:new Date().toISOString(),status:'completed',segments:[{id:'s1',offset:0,source:'English',translation:'中文'}],materials:[],warnings:[],summary:'课堂总结'});
 const user=(env,subject)=>createVerifiedAccountSession(env,{provider:'email',subject,label:subject});
