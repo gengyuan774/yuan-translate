@@ -109,7 +109,7 @@ test('uploaded PPT survives live translation, trial, summary and cloud reopen',a
   await localApi('/api/sessions/'+s.id+'/try',{method:'POST',body:JSON.stringify({text:'Explain opportunity cost.'})});
   await live.command({type:'start',id:s.id});assert.equal(live.session.materials[0].id,mid);
   await live.handle({type:'conversation.item.input_audio_transcription.completed',item_id:'segment',transcript:'Opportunity cost matters.'});
-  await live.queue;live.closing=true;await live.finalize();
+  await live.queue;live.closing=true;live.finishWithSummary=true;await live.finalize();
   const reopened=await getSession(s.id);assert.equal(reopened.materials[0].id,mid);assert.equal(reopened.summarySources[0].name,'lecture.pptx');
   assert.equal(reopened.segments[0].translation,'机会成本：最佳替代方案的价值。');
   assert.ok(inputs.length>=4);for(const input of inputs)assert.match(input,/next best alternative/);

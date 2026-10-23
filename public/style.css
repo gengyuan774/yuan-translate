@@ -79,3 +79,5 @@ dialog{background:#fff;color:#454c56;border-color:#e6e9ed;box-shadow:0 22px 80px
 .message .recording-takeover{margin-top:12px;padding:10px 16px;min-height:44px;border:1px solid #cda66b;border-radius:8px;background:#fff;color:#785724;cursor:pointer;font:inherit}.message .recording-takeover:disabled{opacity:.6;cursor:wait}
 
 .recording-continuity{margin:12px 0 22px;color:#7a8590;font-size:12px;line-height:1.8}
+
+.control-actions{flex-wrap:wrap}.control-actions button{white-space:nowrap}@media(max-width:420px){.control-actions{width:100%;margin-left:0}.control-actions button{flex:1;padding:10px 7px}}

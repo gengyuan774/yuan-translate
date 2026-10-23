@@ -79,7 +79,7 @@ test('live pipeline merges before the API call, ignores duplicates, and persists
  await f.live.queue;assert.equal(f.requests.length,1);assert.match(f.requests[0].input,/The main reason\. why this happens\. is the increase in demand\./);
  await f.done('b','why this happens.');assert.equal(f.live.session.segments.length,1);assert.equal(f.live.pending,0);
  const saved=await getSession(f.live.session.id);assert.equal(saved.segments[0].translation,'合并后的中文译文');assert.equal(saved.segments[0].sourceParts.length,3);
- await f.live.command({type:'finish'});for(let i=0;i<100&&!f.live.closed;i++)await new Promise(r=>setTimeout(r,5));
+ await f.live.command({type:'finish',autoSummary:true});for(let i=0;i<100&&!f.live.closed;i++)await new Promise(r=>setTimeout(r,5));
  assert.equal(f.live.closed,true);assert.equal(f.requests.length,2);assert.equal((await getSession(saved.id)).summary,'课堂总结');
 });
 test('out-of-order completions are merged in committed audio order',async t=>{
@@ -93,7 +93,7 @@ test('pause flushes a fragment immediately and late final transcripts are also t
 });
 test('finish flushes unfinished text before generating notes',async t=>{
  const f=await setup(t);await f.commit('a',0);await f.done('a','This is because.');assert.equal(f.requests.length,0);
- await f.live.command({type:'finish'});for(let i=0;i<100&&!f.live.closed;i++)await new Promise(r=>setTimeout(r,5));
+ await f.live.command({type:'finish',autoSummary:true});for(let i=0;i<100&&!f.live.closed;i++)await new Promise(r=>setTimeout(r,5));
  assert.equal(f.live.closed,true);assert.equal(f.requests.length,2);assert.match(f.requests[0].instructions,/同声传译员/);assert.equal(f.requests[1].instructions,undefined);assert.match(f.requests[1].snapshot.segments[0].source,/This is because\./);
 });
 test('a failed transcription forms a boundary instead of joining speech across missing audio',async t=>{

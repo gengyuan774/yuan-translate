@@ -117,7 +117,7 @@ export class BrowserLive{
     this.paused=false;this.startHeartbeat();this.session.status='recording';await this.persist();this.emit({type:'ready'});}
    else {this.paused=true;if(this.pending)this.warn('重新连接前部分语音未识别完成，记录可能存在缺失。');this.pending=0;this.meta=[];this.started=Date.now();this.base=lastOffset(this.session)+1000;await this.connect();}
   }
-  if(e.type==='finish'&&!this.closing&&!this.finishingRequested){this.finishingRequested=true;this.paused=true;this.cancelRecovery();await this.renewal;if(this.closed)return;this.closing=true;this.paused=true;this.turns?.flush();this.merger.flush();this.session.status='finishing';await this.persist();this.emit({type:'status',message:'正在收齐最后的字幕…'});this.finishTimer=setTimeout(()=>this.finalize(true),20000);this.finalize();}
+  if(e.type==='finish'&&!this.closing&&!this.finishingRequested){this.finishingRequested=true;this.finishWithSummary=e.autoSummary===true;this.paused=true;this.cancelRecovery();await this.renewal;if(this.closed)return;this.closing=true;this.paused=true;this.turns?.flush();this.merger.flush();this.session.status='finishing';await this.persist();this.emit({type:'status',message:'正在收齐最后的字幕…'});this.finishTimer=setTimeout(()=>this.finalize(true),20000);this.finalize();}
  }
  async changeLanguage(code){
   if(!this.session||!this.paused||this.closing)throw new Error('请先暂停录音再切换语言');
@@ -230,10 +230,10 @@ export class BrowserLive{
   if(timeout&&this.pending)this.warn('结束时部分语音转写尚未完成，可能缺少最后一段。');
   if(this.upstream){this.upstream.onclose=null;this.upstream.close();}
   this.drainTranscripts(true);this.merger.flush();
-  const autoSummary=accessConfig().tier!=='trial';
+  const autoSummary=this.finishWithSummary===true&&accessConfig().paidMember===true;
   this.emit({type:'status',message:autoSummary?'正在完成翻译并生成总结…':'正在完成翻译并保存课堂…'});await Promise.allSettled([...this.jobs]);this.session.endedAt=new Date().toISOString();
   try{await complete(this.session,{autoSummary});}catch(e){this.warn(e.message+(autoSummary?'；原文已保存，可稍后重新生成总结。':'；课堂保存尚未完成，请重新打开记录检查。'));}
-  this.emit({type:'finished',session:this.session});this.close();
+  this.emit({type:'finished',session:this.session,autoSummary});this.close();
  }
  close(){if(this.closed)return;this.cancelRecovery();this.connectionAbortCleanup?.();this.stopHeartbeat();this.drainTranscripts(true);this.merger.flush();this.closed=true;this.connectedReject?.(new Error('连接已结束'));this.readyState=3;clearInterval(this.idleTimer);clearTimeout(this.pauseTimer);clearTimeout(this.connectTimer);clearTimeout(this.limitTimer);clearTimeout(this.finishTimer);if(this.upstream){this.upstream.onclose=null;this.upstream.close();}if(this.session){busy.delete(this.session.id);if(!this.finalizing){this.session.status='interrupted';this.persist();}}this.onclose?.();}
 }

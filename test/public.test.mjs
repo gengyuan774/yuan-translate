@@ -55,7 +55,7 @@ test('trial uses mock responses and never appends to classroom transcript',async
  try{const result=await localApi('/api/sessions/'+s.id+'/try',{method:'POST',body:JSON.stringify({text:'Opportunity cost is a trade-off.'})});assert.equal(result.translation,'模拟测试输出');assert.equal(result.summary,'模拟测试输出');assert.equal((await getSession(s.id)).segments.length,0);assert.equal(busy.has(s.id),false);}finally{globalThis.fetch=original;}
 });
 test('finish waits for final transcript and queued translation before summarizing',async()=>{
- const s=await create(),live=new BrowserLive(),events=[];live.session=s;live.base=0;live.started=Date.now();live.pending=1;live.closing=true;live.onmessage=e=>events.push(JSON.parse(e.data));
+ const s=await create(),live=new BrowserLive(),events=[];live.session=s;live.base=0;live.started=Date.now();live.pending=1;live.closing=true;live.finishWithSummary=true;live.onmessage=e=>events.push(JSON.parse(e.data));
  const original=globalThis.fetch;let calls=0;globalThis.fetch=async path=>{calls++;return path==='/api/service/summary'?Response.json({summary:'最终总结'}):answer('最终译文');};
  try{await live.finalize();assert.equal(live.finalizing,undefined);await live.handle({type:'input_audio_buffer.committed',item_id:'last'});await live.handle({type:'conversation.item.input_audio_transcription.completed',item_id:'last',transcript:'Final spoken sentence.'});
  for(let i=0;i<100&&!live.closed;i++)await new Promise(r=>setTimeout(r,5));

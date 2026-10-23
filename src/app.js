@@ -32,7 +32,7 @@ let majorBusy=false,accountBusy=false,passwordEnabled=false,passwordRegister=fal
 const registrationClient=new RegistrationClient();
 let registrationPending=false,registrationStage='',registrationFailed=false,passwordSubmissionVersion=0;
 let phoneTimer;
-let flushResolver, wakeLock, partials=new Map(), lastEnded=false, resumeAfterSystemInterruption=false;
+let flushResolver, wakeLock, partials=new Map(), lastEnded=false, resumeAfterSystemInterruption=false, finishSummaryRequested=false;
 const escape=s=>String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const time=ms=>{const s=Math.max(0,Math.floor(ms/1000));return [Math.floor(s/3600),Math.floor(s/60)%60,s%60].map(x=>String(x).padStart(2,'0')).join(':');};
 function notice(text){$('message').textContent=text;$('message').hidden=!text;}
@@ -54,11 +54,11 @@ function controls(next){
  mode=next;const recording=mode==='recording',busy=['connecting','finishing'].includes(mode),live=['recording','paused','reconnecting'].includes(mode);
  $('start').hidden=live || mode==='finishing';$('start').disabled=busy;$('start').textContent=mode==='connecting'?'正在连接…':current?.segments.length&&!current.demo?'继续这节课':'● 开始上课';
  $('pause').hidden=!live;$('pause').textContent=mode==='paused'?'▶ 继续录音':'Ⅱ 暂停';$('finish').hidden=!live && mode!=='finishing';$('finish').disabled=mode==='finishing'||languageBusy;$('pause').disabled=languageBusy;
- $('finish').textContent=config?.paidMember?'■ 结束并总结':'■ 结束课堂';
+ $('finish').textContent='■ 结束录音';$('finish-summary').hidden=!live&&mode!=='finishing';$('finish-summary').disabled=mode==='finishing'||languageBusy||!config?.paidMember;$('finish-summary').title=config?.paidMember?'停止录音、保存字幕并生成课堂总结':'普通会员或金会员可生成课堂总结';
  $('new-class').disabled=busy||live||materialBusy||languageBusy;$('demo').disabled=busy||live||materialBusy||languageBusy;$('title').disabled=busy||live||!!current;
  $('status-dot').classList.toggle('live',recording);document.querySelector('.meter').classList.toggle('live',recording);
  $('status').textContent=({idle:'准备就绪',connecting:'连接中',recording:'正在听课',reconnecting:'正在自动重连',paused:'已暂停',finishing:'正在整理课堂',ended:'课堂已结束'})[mode];
- $('status-detail').textContent=recording?(micLabel||'本机麦克风')+' · '+direction(selectedLanguage):mode==='paused'?'点击继续录音，接着记录课堂':mode==='finishing'?'请保持页面打开，笔记正在生成':'优先使用本机麦克风 · '+direction(selectedLanguage);
+ $('status-detail').textContent=recording?(micLabel||'本机麦克风')+' · '+direction(selectedLanguage):mode==='paused'?'点击继续录音，接着记录课堂':mode==='finishing'?(finishSummaryRequested?'请保持页面打开，正在保存字幕并生成总结':'正在保存课堂字幕，不生成总结'):'优先使用本机麦克风 · '+direction(selectedLanguage);
  $('retry-summary').disabled=busy||live||materialBusy||languageBusy;updateMaterialControls();updateLanguageUI();updateTranslationModeLabel();
 }
 function updateLanguageUI(){
@@ -165,8 +165,9 @@ async function begin(){
      if(e.type==='finished'){
        lastEnded=true;current=e.session;await releaseAudio();partials.clear();renderPartial();controls('ended');render();
        history().catch(()=>{});
-       if(current.summary)await summaryReady();
-       else if(!config.paidMember)notice('课堂已结束，字幕已保存。免费体验不含课堂总结，开通会员后可生成。');
+       if(e.autoSummary&&current.summary)await summaryReady();
+       else if(!e.autoSummary)notice('录音已结束，字幕已保存，未生成总结。'+(config.paidMember?'需要时可点击“生成课堂总结”。':''));
+       else if(current.summaryError)notice('录音已结束，字幕已保存。总结未生成：'+current.summaryError);
      }
    };
    ws.onerror=()=>notice('连接失败，请检查网络后重试。');
@@ -191,10 +192,12 @@ async function pauseRecording(automatic=false){
    }else await begin();
  }
 }
-async function finish(){
- if(!current)return;resumeAfterSystemInterruption=false;
- $('finish').disabled=true;$('pause').disabled=true;if(mode==='recording'){await flush();elapsed+=Date.now()-startedAt;}$('pause').disabled=false;
- controls('finishing');await releaseAudio();send({type:'finish'});
+async function finish(autoSummary=false){
+ if(!current||mode==='finishing')return;
+ if(autoSummary&&!config.paidMember){notice('课堂总结需要普通会员或金会员。');return;}
+ finishSummaryRequested=autoSummary;resumeAfterSystemInterruption=false;
+ $('finish').disabled=true;$('finish-summary').disabled=true;$('pause').disabled=true;if(mode==='recording'){await flush();elapsed+=Date.now()-startedAt;}$('pause').disabled=false;
+ controls('finishing');await releaseAudio();send({type:'finish',autoSummary});
 }
 function updateExportControls(){
  const empty=!current||(!current.segments.length&&!current.summary);
@@ -276,7 +279,7 @@ $('trial-run').onclick=async()=>{
  try{await ensureClass();const result=await api(`/api/sessions/${current.id}/try`,{method:'POST',body:JSON.stringify({text})});current.lastTrial=result;showTrial(result);$('trial-status').textContent='试译完成，结果已保存在这节课中。测试内容未加入课堂字幕。';}catch(e){$('trial-status').textContent=e.message;}finally{materialBusy=false;controls(mode);$('trial-run').disabled=false;$('trial-close').disabled=false;$('trial-input').disabled=false;}
 };
 const initialEmpty=$('transcript').innerHTML;
-$('new-class').onclick=()=>{if(!materialLocked())blank();};$('start').onclick=begin;$('pause').onclick=()=>pauseRecording();$('finish').onclick=finish;
+$('new-class').onclick=()=>{if(!materialLocked())blank();};$('start').onclick=begin;$('pause').onclick=()=>pauseRecording();$('finish').onclick=()=>finish(false);$('finish-summary').onclick=()=>finish(true);
 let accessBusy=false;
 function renderAccess(){
  $('setup-hint').hidden=config.hasKey;$('member-use').hidden=!config.member;$('settings-account').hidden=!!profileUser;
@@ -316,7 +319,7 @@ $('history').onclick=async e=>{
  }catch(error){notice(error.message);}finally{historyActionBusy=false;button.disabled=false;}
 };
 $('history-select').onchange=e=>openHistory(e.target.value);
-$('retry-summary').onclick=async()=>{if(!current)return;if(!current.demo&&!config.paidMember){notice('课堂总结需要普通会员或金会员。新账号免费体验包含 1 小时翻译，不含课堂总结；可在个人中心开通会员。');return;}if(!config.hasKey&&(!current.demo||current.materials?.length)){$('settings').showModal();return;}controls('finishing');notice('正在整理课堂笔记…');try{current=await api(`/api/sessions/${current.id}/summary`,{method:'POST'});controls('ended');render();if(current.demo)$('start').hidden=true;await summaryReady();}catch(e){controls('ended');render();notice(e.message);}};
+$('retry-summary').onclick=async()=>{if(!current)return;if(!current.demo&&!config.paidMember){notice('课堂总结需要普通会员或金会员。新账号免费体验包含 1 小时翻译，不含课堂总结；可在个人中心开通会员。');return;}if(!config.hasKey&&(!current.demo||current.materials?.length)){$('settings').showModal();return;}finishSummaryRequested=true;controls('finishing');notice('正在整理课堂笔记…');try{current=await api(`/api/sessions/${current.id}/summary`,{method:'POST'});controls('ended');render();if(current.demo)$('start').hidden=true;await summaryReady();}catch(e){controls('ended');render();notice(e.message);}};
 $('export-pdf').onclick=()=>download('pdf-summary');$('export-transcript-pdf').onclick=()=>download('pdf-transcript');$('export-md').onclick=()=>download('md');$('export-html').onclick=()=>download('html');
 window.addEventListener('beforeunload',e=>{if(translationModeBusy||accountBusy||materialBusy||languageBusy||['recording','paused','connecting','reconnecting','finishing'].includes(mode)){e.preventDefault();e.returnValue='';}});
 async function restoreRecording(){
