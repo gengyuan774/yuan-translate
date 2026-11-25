@@ -17,6 +17,27 @@ function officeFiles(buffer){let total=0,count=0;return unzipSync(new Uint8Array
 }});}
 function relationships(files,name){if(!files[name])return [];return nodes(xml(strFromU8(files[name])),'Relationship').map(x=>({id:x.attrs['@_Id'],target:x.attrs['@_Target'],type:x.attrs['@_Type'],external:x.attrs['@_TargetMode']==='External'}));}
 function targetPath(base,target){return target?.startsWith('/')?target.slice(1):path.posix.normalize(path.posix.join(base,target||''));}
+function textPages(text){
+ const normalized=text.replace(/\r\n?/g,'\n'),pages=[];
+ for(let start=0;start<normalized.length;){
+  let end=Math.min(start+3000,normalized.length);
+  if(end<normalized.length&&normalized.charCodeAt(end)>=0xdc00&&normalized.charCodeAt(end)<=0xdfff)end--;
+  pages.push({label:`第 ${pages.length+1} 段`,text:normalized.slice(start,end)});start=end;
+ }
+ return pages;
+}
+export async function pdfPageText(page,remaining){
+ // WebKit versions used on mobile can read streams without supporting for-await on them.
+ const reader=page.streamTextContent().getReader();let text='';
+ try{
+  while(true){
+   const {done,value}=await reader.read();if(done)break;
+   for(const item of value.items)if(typeof item.str==='string')text+=item.str+(item.hasEOL?'\n':' ');
+   if(text.length>remaining)throw new Error('资料文字超过 20 万字符，请拆分后导入');
+  }
+ }finally{await reader.cancel().catch(()=>{});reader.releaseLock();page.cleanup();}
+ return text;
+}
 export async function extractMaterial(buffer,name){
  if(!buffer.length)throw new Error('文件为空');if(buffer.length>MAX_FILE_BYTES)throw new Error('每份资料最大 20 MB');
  const ext=path.extname(name).toLowerCase();let pages=[],warnings=[];
@@ -24,7 +45,7 @@ export async function extractMaterial(buffer,name){
    let text;try{const encoding=buffer[0]===255&&buffer[1]===254?'utf-16le':buffer[0]===254&&buffer[1]===255?'utf-16be':'utf-8';text=new TextDecoder(encoding,{fatal:true}).decode(buffer);}catch{throw new Error('文本编码无法读取，请另存为 UTF-8 后导入');}
    if(text.includes('\0'))throw new Error('这不是可读取的文本文件');
    if(text.length>MAX_TEXT)throw new Error('文本超过 20 万字符，请拆分后导入');
-   for(let i=0;i<text.length;i+=3000)pages.push({label:`第 ${Math.floor(i/3000)+1} 段`,text:text.slice(i,i+3000)});
+   pages=textPages(text);
  }else if(ext==='.pptx'||ext==='.docx'){
    let files;try{files=officeFiles(buffer);}catch(e){throw new Error('无法读取 Office 文档：'+e.message);}
    if(ext==='.pptx'){
@@ -43,7 +64,7 @@ export async function extractMaterial(buffer,name){
    }else{
      if(!files['word/document.xml'])throw new Error('文件不是有效的 DOCX');
      const text=['word/document.xml','word/footnotes.xml','word/endnotes.xml'].filter(n=>files[n]).map(n=>paragraphs(xml(strFromU8(files[n])),'w')).join('\n');
-     for(let i=0;i<text.length;i+=3000)pages.push({label:`第 ${Math.floor(i/3000)+1} 段`,text:text.slice(i,i+3000)});
+     pages=textPages(text);
      warnings.push('已读取正文、表格文字和脚注；图片及公式的视觉内容未解析。');
    }
  }else if(ext==='.pdf'){
@@ -52,16 +73,16 @@ export async function extractMaterial(buffer,name){
    const task=getDocument({data:new Uint8Array(buffer),isEvalSupported:false,useSystemFonts:true,disableFontFace:true,verbosity:0});
    try{
      const doc=await task.promise;if(doc.numPages>MAX_PAGES)throw new Error('PDF 超过 300 页，请拆分后导入');
+     let remaining=MAX_TEXT;
      for(let i=1;i<=doc.numPages;i++){
-       const page=await doc.getPage(i), content=await page.getTextContent();
-       pages.push({label:`第 ${i} 页`,text:content.items.filter(x=>'str' in x).map(x=>x.str+(x.hasEOL?'\n':' ')).join('')});page.cleanup();
-       if(pages.reduce((n,p)=>n+p.text.length,0)>MAX_TEXT)throw new Error('资料文字超过 20 万字符，请拆分后导入');
+       const text=await pdfPageText(await doc.getPage(i),remaining);remaining-=text.length;
+       pages.push({label:`第 ${i} 页`,text});
      }
    }catch(e){if(e.name==='PasswordException')throw new Error('PDF 已加密，请先解锁再导入');throw e;}finally{await task.destroy();}
    warnings.push('仅读取 PDF 的文字层；扫描图片、图表和公式图片未解析。');
  }else if(ext==='.ppt'||ext==='.doc'){throw new Error('旧版 PPT/DOC 请先另存为 PPTX/DOCX 或 PDF 后导入');}
  else throw new Error('支持 PPTX、PDF、DOCX、TXT 和 Markdown 文件');
- pages=pages.map(p=>({...p,text:p.text.replace(/\r/g,'').trim()}));
+ pages=pages.map(p=>({...p,text:p.text.replace(/\r\n?/g,'\n').trim()}));
  const missing=pages.filter(p=>!p.text).map(p=>p.label);
  if(missing.length)warnings.push(`未提取到文字：${missing.slice(0,15).join('、')}${missing.length>15?' 等':''}。这些页面可能只有图片。`);
  const characters=pages.reduce((n,p)=>n+p.text.length,0);

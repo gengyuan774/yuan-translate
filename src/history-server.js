@@ -3,6 +3,7 @@ import {requireAccount} from './account-server.js';
 import {normalizeMajor} from './majors.js';
 import {MemberError} from './member.js';
 import {validLanguage} from './languages.js';
+import {hasSubtitleText} from './transcript-merge.js';
 const uuid=value=>typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
 const storage=env=>{if(!env.DB||!env.BUCKET)throw new MemberError('历史记录保存服务暂不可用，请稍后重试。');return env;};
 async function record(env,owner,id){return env.DB.prepare('SELECT * FROM account_classes WHERE account_id = ? AND id = ?').bind(owner,id).first();}
@@ -57,7 +58,7 @@ export async function historyRoute(request,env,user,path,data){
    const key=`accounts/${owner}/classes/${id}/${crypto.randomUUID()}.json`;
    await env.BUCKET.put(key,JSON.stringify(s),{httpMetadata:{contentType:'application/json'}});
    let updated;
-   try{await requireAccount(request,env);updated=await env.DB.prepare('INSERT INTO account_classes (account_id, id, title, created_at, status, segment_count, demo, object_key, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1) ON CONFLICT(account_id, id) DO UPDATE SET title=excluded.title, created_at=excluded.created_at, status=excluded.status, segment_count=excluded.segment_count, demo=excluded.demo, object_key=excluded.object_key, revision=account_classes.revision+1 WHERE account_classes.revision = ? RETURNING revision').bind(owner,id,s.title,s.createdAt,s.status,s.segments.length,s.demo?1:0,key,revision).first();}catch(e){await removeObject(env,key);throw e;}
+   try{await requireAccount(request,env);updated=await env.DB.prepare('INSERT INTO account_classes (account_id, id, title, created_at, status, segment_count, demo, object_key, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1) ON CONFLICT(account_id, id) DO UPDATE SET title=excluded.title, created_at=excluded.created_at, status=excluded.status, segment_count=excluded.segment_count, demo=excluded.demo, object_key=excluded.object_key, revision=account_classes.revision+1 WHERE account_classes.revision = ? RETURNING revision').bind(owner,id,s.title,s.createdAt,s.status,s.segments.filter(hasSubtitleText).length,s.demo?1:0,key,revision).first();}catch(e){await removeObject(env,key);throw e;}
    if(!updated){await removeObject(env,key);throw new MemberError('这节课已在其他页面更新，请重新打开记录后继续。',409);}
    if(existing)await removeObject(env,existing.object_key);return updated;
   }

@@ -1,5 +1,6 @@
 import {validTranslationMode} from './models.js';
 import {normalizeMajor} from './majors.js';
+import {hasSubtitleText} from './transcript-merge.js';
 let account=null;
 const connections=new Map(),queues=new Map(),syncJobs=new Map(),retryTimers=new Map(),materialCache=new Map();
 const storageKey=(owner,id)=>JSON.stringify([owner,id]);
@@ -9,6 +10,16 @@ function database(owner,kind=''){const separate=kind==='preferences'||kind==='su
 async function transaction(owner,store,mode,operation){const db=await database(owner,store);return new Promise((resolve,reject)=>{const tx=db.transaction(store,mode),request=operation(tx.objectStore(store));let result;request.onsuccess=()=>result=request.result;tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(new Error('浏览器保存失败，存储空间可能不足，请先导出笔记'));tx.onabort=()=>reject(new Error('浏览器保存失败，请重试'));});}
 const cached=(owner,store,id)=>transaction(owner,store,'readonly',s=>s.get(id));
 const put=(owner,store,value)=>transaction(owner,store,'readwrite',s=>s.put(structuredClone(value)));
+function read(request){return new Promise((resolve,reject)=>{request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});}
+// The content and its revision belong to the same IndexedDB transaction, including across tabs.
+async function sessionRecords(owner,mode,operation){
+ const db=await database(owner),tx=db.transaction(['sessions','sync'],mode);
+ const complete=new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error||new Error('浏览器保存失败，请重试'));});
+ const work=operation(tx.objectStore('sessions'),tx.objectStore('sync')).catch(error=>{
+  try{tx.abort();}catch{}throw error;
+ });
+ const [result]=await Promise.all([work,complete]);return result;
+}
 export function setAccount(user){account=user?.id||null;materialCache.clear();}
 export function accountId(){return account;}
 export async function getTranslationModePreference(){const value=(await cached(account,'preferences','translation-mode'))?.value;return validTranslationMode(value)?value:'accurate';}
@@ -34,7 +45,8 @@ export async function deleteSession(id){const owner=account;await stopSync(owner
  const db=await database(owner);
  await new Promise((resolve,reject)=>{
   const tx=db.transaction(['sessions','materials','sync'],'readwrite');
-  tx.objectStore('sessions').delete(id);tx.objectStore('sync').delete(id);
+  tx.objectStore('sessions').delete(id);
+  if(owner)tx.objectStore('sync').put({id,deleted:true});else tx.objectStore('sync').delete(id);
   const cursor=tx.objectStore('materials').openCursor();cursor.onsuccess=()=>{const row=cursor.result;if(!row)return;if(String(row.key).startsWith(id+':'))row.delete();row.continue();};
   tx.oncomplete=resolve;tx.onerror=()=>reject(new Error('删除失败，请重试'));tx.onabort=()=>reject(new Error('删除失败，请重试'));
  });
@@ -44,15 +56,26 @@ export async function deleteSession(id){const owner=account;await stopSync(owner
 });}
 export function storageDescription(){return account?'先保存在本机，定时同步到账户':'课堂记录保存在当前浏览器';}
 function report(message){if(typeof window!=='undefined')window.dispatchEvent(new CustomEvent('history-save-warning',{detail:message}));}
-async function cloud(owner,path,{method='GET',body}={}){const response=await fetch('/api/history'+path,{method,credentials:'same-origin',headers:{'X-Account-ID':owner,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(20000)});const data=await response.json();if(!response.ok){const error=new Error(data.error?.message||'账户历史记录暂不可用');error.status=response.status;throw error;}return data;}
+const transient=error=>!error.status||error.status>=500||error.status===429;
+async function cloud(owner,path,{method='GET',body}={}){
+ const response=await fetch('/api/history'+path,{method,credentials:'same-origin',headers:{'X-Account-ID':owner,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(20000)});
+ if(!response.ok){const data=await response.json().catch(()=>null);throw Object.assign(new Error(data?.error?.message||'账户历史记录暂不可用'),{status:response.status});}
+ return response.json();
+}
 function serial(owner,id,operation){const key=owner+':'+id;const next=(queues.get(key)||Promise.resolve()).catch(()=>{}).then(operation);queues.set(key,next);next.finally(()=>{if(queues.get(key)===next)queues.delete(key);}).catch(()=>{});return next;}
 function syncEvent(owner,id,pending){if(typeof window!=='undefined')window.dispatchEvent(new CustomEvent('history-sync',{detail:{owner,id,pending}}));}
 function scheduleRetry(owner,id,delay=5000){
  const key=storageKey(owner,id);if(retryTimers.has(key))return;
- const timer=setTimeout(()=>{retryTimers.delete(key);if(account===owner)syncSession(owner,id).catch(()=>{});},delay);
+ const timer=setTimeout(()=>{retryTimers.delete(key);if(account===owner)flushSavedSession(owner,id).catch(()=>{});},delay);
  timer.unref?.();retryTimers.set(key,timer);
 }
 async function stopSync(owner,id){const key=storageKey(owner,id);clearTimeout(retryTimers.get(key));retryTimers.delete(key);await syncJobs.get(key)?.catch(()=>{});clearTimeout(retryTimers.get(key));retryTimers.delete(key);}
+function flushSavedSession(owner,id){
+ const key=storageKey(owner,id),active=syncJobs.get(key);
+ clearTimeout(retryTimers.get(key));retryTimers.delete(key);
+ // A write can finish just after the in-flight upload has checked its final version.
+ return active?active.then(()=>syncSession(owner,id)):syncSession(owner,id);
+}
 // Local writes never wait for the network. Only one cloud write per classroom is
 // active; live snapshots wait for the next batch, with the returned revision.
 function syncSession(owner,id){
@@ -60,16 +83,26 @@ function syncSession(owner,id){
  clearTimeout(retryTimers.get(key));retryTimers.delete(key);
  const job=(async()=>{
   while(true){
-   const current=await serial(owner,id,async()=>({state:await cached(owner,'sync',id),snapshot:await cached(owner,'sessions',id)}));
-   if(!current.state?.pending)return;
-   const result=await cloud(owner,'/'+id,{method:'PUT',body:{session:current.snapshot,revision:current.state.revision}});
-   const deferred=await serial(owner,id,async()=>{
-    const latest=await cached(owner,'sync',id);
-    const pending=latest.version!==current.state.version;
-    await put(owner,'sync',{...latest,revision:result.revision,pending});syncEvent(owner,id,pending);
-    return pending&&latest.deferCloud;
+   const [state,snapshot]=await sessionRecords(owner,'readonly',(sessions,sync)=>Promise.all([read(sync.get(id)),read(sessions.get(id))]));
+   if(!state?.pending)return;
+   let result;
+   try{result=await cloud(owner,'/'+id,{method:'PUT',body:{session:snapshot,revision:state.revision}});}
+   catch(error){
+    if(!transient(error))await sessionRecords(owner,'readwrite',async(_sessions,sync)=>{
+     const latest=await read(sync.get(id));
+     if(latest?.pending&&latest.revision===state.revision)sync.put({...latest,retryBlocked:true});
+    });
+    throw error;
+   }
+   const outcome=await sessionRecords(owner,'readwrite',async(_sessions,sync)=>{
+    const latest=await read(sync.get(id));if(!latest||latest.deleted||latest.revision>result.revision)return null;
+    const pending=latest.version!==state.version;
+    sync.put({...latest,revision:result.revision,pending});
+    return {pending,deferred:latest.deferCloud};
    });
-   if(deferred){scheduleRetry(owner,id,30000);return;}
+   if(!outcome)return;syncEvent(owner,id,outcome.pending);
+   if(!outcome.pending)return;
+   if(outcome.deferred){scheduleRetry(owner,id,30000);return;}
   }
  })().catch(error=>{
   if(account===owner)report('记录已暂存在此设备，账户同步未完成：'+error.message);
@@ -81,36 +114,53 @@ function syncSession(owner,id){
 }
 export async function saveSession(s,{background=false,deferCloud=false,owner=account}={}){
  const snapshot=structuredClone(s);
- await serial(owner,s.id,async()=>{
-  await put(owner,'sessions',snapshot);if(!owner)return;
-  const state=await cached(owner,'sync',s.id)||{id:s.id,revision:0};
-  await put(owner,'sync',{...state,pending:true,deferCloud:background&&deferCloud,version:(state.version||0)+1});syncEvent(owner,s.id,true);
- });
- if(owner){if(background&&deferCloud){if(!syncJobs.has(storageKey(owner,s.id)))scheduleRetry(owner,s.id,30000);return;}const job=syncSession(owner,s.id);if(background){job.catch(()=>{});}else await job;}
+ await serial(owner,s.id,()=>sessionRecords(owner,'readwrite',async(sessions,sync)=>{
+  if(owner){
+   const state=await read(sync.get(s.id));
+   if(state?.deleted)throw Object.assign(new Error('这节课已被删除。'),{status:404});
+   sync.put({id:s.id,revision:state?.revision||0,pending:true,deferCloud:background&&deferCloud,version:(state?.version||0)+1});
+  }
+  sessions.put(snapshot);
+ }));
+ if(owner)syncEvent(owner,s.id,true);
+ if(owner){if(background&&deferCloud){scheduleRetry(owner,s.id,30000);return;}const job=flushSavedSession(owner,s.id);if(background){job.catch(()=>{});}else await job;}
 }
 export async function sessionSyncPending(id){return !!(await cached(account,'sync',id))?.pending;}
 export async function getSession(id){const owner=account;invalidateMaterials(owner,id);
- if(owner){const pending=await cached(owner,'sync',id);if(pending?.pending){report('这节课有尚未同步到账户的内容，已打开此设备的副本。');const local=await cached(owner,'sessions',id);if(local)return local;}
- const result=await cloud(owner,'/'+id);await put(owner,'sessions',result.session);await put(owner,'sync',{id,revision:result.revision,pending:false});return result.session;}
+ if(owner){const pending=await cached(owner,'sync',id);if(pending?.deleted)throw Object.assign(new Error('这节课已被删除。'),{status:404});
+ if(pending?.pending){report('这节课有尚未同步到账户的内容，已打开此设备的副本。');const local=await cached(owner,'sessions',id);if(local)return local;}
+ try{const result=await cloud(owner,'/'+id);
+  return await sessionRecords(owner,'readwrite',async(sessions,sync)=>{
+   const latest=await read(sync.get(id));
+   if(account!==owner)throw Object.assign(new Error('登录账号已变化。'),{status:409});
+   if(latest?.deleted)throw Object.assign(new Error('这节课已被删除。'),{status:404});
+   if(latest?.pending||latest?.revision>result.revision)return read(sessions.get(id));
+   sessions.put(result.session);sync.put({id,version:latest?.version||0,revision:result.revision,pending:false});return result.session;
+  });}
+ catch(error){const local=transient(error)&&account===owner?await cached(owner,'sessions',id):null;if(!local)throw error;report('暂时无法连接账户，已打开此设备保存的课堂副本。联网后请重新打开以获取最新记录。');return local;}}
  const s=await cached(owner,'sessions',id);if(!s)throw new Error('当前浏览器中没有这节课');return s;
 }
-const metadata=({id,title,createdAt,status,segments,demo})=>({id,title,createdAt,status,count:segments.length,demo});
+const metadata=({id,title,createdAt,status,segments,demo})=>({id,title,createdAt,status,count:segments.filter(hasSubtitleText).length,demo});
 export async function listSessions(){const owner=account;
  const pins=new Set((await transaction(owner,'preferences','readonly',store=>store.getAll())).filter(x=>x.id.startsWith('pin:')&&x.pinned).map(x=>x.id.slice(4)));
  const sorted=items=>items.map(s=>({...s,pinned:pins.has(s.id)})).sort((a,b)=>Number(b.pinned)-Number(a.pinned)||b.createdAt.localeCompare(a.createdAt));
- const local=(await transaction(owner,'sessions','readonly',store=>store.getAll())).map(metadata);
- if(!owner)return sorted(local);
- const states=(await transaction(owner,'sync','readonly',store=>store.getAll())).filter(s=>s.pending);
- // Reopening the page restores uploads left pending in durable local storage.
- for(const state of states)if(state.deferCloud&&account===owner&&!syncJobs.has(storageKey(owner,state.id)))scheduleRetry(owner,state.id,30000);
- const remote=await cloud(owner,'');const pending=(await transaction(owner,'sync','readonly',store=>store.getAll())).filter(s=>s.pending).map(s=>s.id);
- return sorted([...remote.filter(s=>!pending.includes(s.id)),...local.filter(s=>pending.includes(s.id))]);
+ if(!owner)return sorted((await transaction(owner,'sessions','readonly',store=>store.getAll())).map(metadata));
+ const before=new Map((await transaction(owner,'sync','readonly',store=>store.getAll())).map(s=>[s.id,s.version]));
+ let remote;try{remote=await cloud(owner,'');}catch(error){if(!transient(error)||account!==owner)throw error;report('暂时无法连接账户，正在显示此设备保存的课堂。其他设备的记录需要联网后读取。');}
+ const [lessons,states]=await sessionRecords(owner,'readonly',(sessions,sync)=>Promise.all([read(sessions.getAll()),read(sync.getAll())]));
+ const local=new Map(lessons.map(s=>[s.id,metadata(s)])),items=new Map((remote||[]).map(s=>[s.id,s]));
+ for(const state of states){
+  if(state.pending&&!state.retryBlocked&&account===owner&&!syncJobs.has(storageKey(owner,state.id)))scheduleRetry(owner,state.id,state.deferCloud?30000:5000);
+  if(state.deleted){items.delete(state.id);continue;}
+  if(local.has(state.id)&&(state.pending||state.version!==before.get(state.id)||state.revision>items.get(state.id)?.revision))items.set(state.id,local.get(state.id));
+ }
+ return sorted(remote?[...items.values()]:[...local.values()]);
 }
 export async function saveMaterial(sessionId,m){const owner=account;invalidateMaterials(owner,sessionId);await put(owner,'materials',{...m,key:sessionId+':'+m.id});if(owner)await cloud(owner,'/'+sessionId+'/materials/'+m.id,{method:'PUT',body:m});}
 export async function getMaterial(sessionId,id){
  const owner=account,key=JSON.stringify([owner,sessionId,id]);
  if(!materialCache.has(key)){
-  const job=(async()=>{if(owner){const result=await cloud(owner,'/'+sessionId+'/materials/'+id);await put(owner,'materials',{...result,key:sessionId+':'+id});return result;}const m=await cached(owner,'materials',sessionId+':'+id);if(!m)throw new Error('当前课堂的资料不存在');return m;})();
+  const job=(async()=>{if(owner){try{const result=await cloud(owner,'/'+sessionId+'/materials/'+id);await put(owner,'materials',{...result,key:sessionId+':'+id});return result;}catch(error){const local=transient(error)&&account===owner?await cached(owner,'materials',sessionId+':'+id):null;if(!local)throw error;report('暂时无法连接账户，已打开此设备保存的资料副本。');return local;}}const m=await cached(owner,'materials',sessionId+':'+id);if(!m)throw new Error('当前课堂的资料不存在');return m;})();
   materialCache.set(key,job);job.catch(()=>{if(materialCache.get(key)===job)materialCache.delete(key);});
   if(materialCache.size>30)materialCache.delete(materialCache.keys().next().value);
  }

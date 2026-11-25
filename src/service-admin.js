@@ -38,14 +38,18 @@ async function summary(env,username,cursor=''){
  const budget=await serviceBudgetState(env);
  const alerts=(await stmt(env,'SELECT id,kind,created_at,details FROM service_alerts WHERE month=? ORDER BY created_at DESC LIMIT 30',budget.month).all()).results;
  const rows=(await stmt(env,`SELECT a.id,a.label,p.username,s.anchor,s.restricted_until,s.reason,s.lease_expires FROM accounts a LEFT JOIN account_passwords p ON p.account_id=a.id LEFT JOIN service_accounts s ON s.account_id=a.id WHERE (?='' OR p.username=?) AND a.id>? ORDER BY a.id LIMIT 51`,username||'',username||'',cursor).all()).results;
- const accounts=[];
- for(const row of rows.slice(0,50)){
-  const m=await membershipFor(env,row.id);
-  const serviceMember=m.active?{...m,accountId:row.id}:await trialFor(env,row.id);
-  const usage=serviceMember?await myUsage(null,env,serviceMember):{active:false};
-  const monthly=await stmt(env,'SELECT COALESCE(SUM(cost),0) AS cost FROM service_requests WHERE account_id=? AND month=?',row.id,budget.month).first();
-  accounts.push({monthlyCostCny:moneyCny(monthly.cost),id:row.id,username:row.username||row.label,membership:m,usage,restrictedUntil:row.restricted_until||0,reason:row.reason||'',recording:row.lease_expires>Date.now()});
- }
+ const selected=rows.slice(0,50),accounts=new Array(selected.length);let nextAccount=0;
+ // Independent accounts can be read together. Bound the fan-out, preserve the
+ // database order, and avoid making every account wait for all previous ones.
+ await Promise.all(Array.from({length:Math.min(4,selected.length)},async()=>{
+  while(nextAccount<selected.length){
+   const index=nextAccount++,row=selected[index];
+   const [m,monthly]=await Promise.all([membershipFor(env,row.id),stmt(env,'SELECT COALESCE(SUM(cost),0) AS cost FROM service_requests WHERE account_id=? AND month=?',row.id,budget.month).first()]);
+   const serviceMember=m.active?{...m,accountId:row.id}:await trialFor(env,row.id);
+   const usage=serviceMember?await myUsage(null,env,serviceMember):{active:false};
+   accounts[index]={monthlyCostCny:moneyCny(monthly.cost),id:row.id,username:row.username||row.label,membership:m,usage,restrictedUntil:row.restricted_until||0,reason:row.reason||'',recording:row.lease_expires>Date.now()};
+  }
+ }));
  const totals=(await stmt(env,'SELECT kind,state,COUNT(*) AS requests,SUM(audio_ms) AS audioMs,SUM(input_tokens) AS inputTokens,SUM(output_tokens) AS outputTokens,SUM(cost) AS costMicros FROM service_requests WHERE month=? GROUP BY kind,state',budget.month).all()).results;
  return {budget,alerts,accounts,totals,next:rows.length>50?rows[49].id:null};
 }

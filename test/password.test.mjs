@@ -15,7 +15,7 @@ test('scrypt hashes use random salts, match independent crypto and reject wrong 
 test('registration persists one account and no plaintext; login restores same account, membership and history',async()=>{
  const {env,sql}=environment();env.BUCKET={};const a=await register(env,' TestUser ');assert.equal(a.user.label,'testuser');assert.equal(a.user.membership.tier,'none');assert.match(a.cookie,/HttpOnly; Secure; SameSite=Strict/);
  const stored=sql.prepare('SELECT * FROM account_passwords').get();assert.equal(stored.username,'testuser');assert.ok(!JSON.stringify(stored).includes(password));assert.equal(stored.account_id,a.user.id);
- const duplicate=await registration(env,'TESTUSER','Another long password');assert.equal(duplicate.status,409);assert.equal(sql.prepare('SELECT count(*) AS n FROM accounts').get().n,1);
+ const duplicate=await registration(env,'TESTUSER','Another long password 9');assert.equal(duplicate.status,409);assert.equal(sql.prepare('SELECT count(*) AS n FROM accounts').get().n,1);
  await call(env,'/api/member/login',{code:'test-member-code'},a.cookie);
  const id=crypto.randomUUID();sql.prepare('INSERT INTO account_classes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(a.user.id,id,'保存的课堂','2026-10-06','completed',2,0,'test',1);
  await call(env,'/api/account/logout',{},a.cookie);assert.equal((await (await call(env,'/api/account',undefined,a.cookie)).json()).user,null);

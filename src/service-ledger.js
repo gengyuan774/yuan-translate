@@ -1,4 +1,4 @@
-import {MemberError} from './errors.js';
+import {AccountRestriction,MemberError} from './errors.js';
 import {memberSession} from './member.js';
 import {PERIOD_MS,planFor,audioCost,textCost,USD_CNY,PRICING_VERSION,moneyCny} from './service-plans.js';
 import {TEXT_MODEL,TRANSCRIPTION_MODEL} from './models.js';
@@ -36,7 +36,7 @@ export async function requireService(request,env){
  const member=await memberSession(request,env);
  if(!member)throw new MemberError('请先登录，新账号赠送 1 小时免费翻译；也可开通会员。',401);
  const state=await serviceState(env,member);
- if(state.account.restricted_until>Date.now())throw new MemberError('此账号的 AI 服务暂时受限，请在个人中心查看恢复时间或联系客服。',403);
+ if(state.account.restricted_until>Date.now())throw new AccountRestriction(state.account.restricted_until);
  if((await settings(env)).paused)throw new MemberError('本站已暂停新增 AI 消耗，请稍后再试。',503);
  return state;
 }

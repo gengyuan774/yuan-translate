@@ -61,7 +61,7 @@ test('registration UI exposes policy and cancellation without applying new passw
  const html=readFileSync(new URL('../public/index.html',import.meta.url),'utf8'),app=readFileSync(new URL('../src/app.js',import.meta.url),'utf8'),security=readFileSync(new URL('../src/security-ui.js',import.meta.url),'utf8'),build=readFileSync(new URL('../build.mjs',import.meta.url),'utf8');
  assert.match(html,/id="login-username"[^>]*autocapitalize="none"[^>]*autocorrect="off"/);assert.match(html,/id="login-password"[^>]*minlength="8"/);
  assert.match(html,/同一账号标识限领一次，注销重注册不补发/);assert.match(html,/防重复领取赠送时长的标记/);assert.match(html,/data-toggle-password="login-password"/);
- assert.match(app,/minLength=passwordRegister\?NEW_PASSWORD_MIN:8/);assert.match(app,/newPasswordError\(password,username\)/);assert.match(app,/window\.addEventListener\('pagehide',\(\)=>cancelRegistration\(\)\)/);assert.match(app,/addEventListener\('input',[\s\S]*?cancelRegistration\('内容已更改/);
+ assert.match(app,/minLength=passwordRegister\?NEW_PASSWORD_MIN:8/);assert.match(app,/passwordFormProblem\(/);assert.match(app,/window\.addEventListener\('pagehide',\(\)=>cancelRegistration\(\)\)/);assert.match(app,/addEventListener\('input',[\s\S]*?cancelRegistration\('内容已更改/);
  assert.match(security,/newPasswordError\(data\.newPassword,accountUsername\)/);assert.match(security,/newPasswordError\(data\.newPassword,resetUsername\)/);assert.match(build,/src\/registration-proof-worker\.js/);
  assert.doesNotMatch(html+app,/人机已验证|粘贴禁止/);
 });

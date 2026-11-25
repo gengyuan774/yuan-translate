@@ -33,6 +33,14 @@ test('tab hiding and back/forward cache do not stop recording; returning restore
  f.fire(f.win,'pageshow',{persisted:true});await Promise.resolve();assert.equal(f.state().recovered,1);
  f.fire(f.win,'pagehide',{persisted:false});assert.equal(f.state().exited,1);f.stop();f.fire(f.win,'online');assert.equal(f.state().recovered,1);f.dispose();
 });
+test('Android freeze persists and marks a system interruption; resume errors are handled and the next recovery remains possible',async()=>{
+ const win=new EventTarget(),doc=new EventTarget();let frozen=0,saved=0,recovered=0;const failures=[];
+ const dispose=initRecordingLifecycle({win,doc,active:()=>true,persist:async()=>saved++,freeze:async()=>frozen++,exit:()=>assert.fail('freeze is not an exit'),recover:async()=>{recovered++;if(recovered===1)throw Error('audio suspended');},failed:e=>failures.push(e.message)});
+ doc.dispatchEvent(new Event('freeze'));await new Promise(r=>setImmediate(r));assert.equal(saved,1);assert.equal(frozen,1);
+ doc.dispatchEvent(new Event('resume'));await new Promise(r=>setImmediate(r));assert.deepEqual(failures,['audio suspended']);
+ doc.dispatchEvent(new Event('resume'));await new Promise(r=>setImmediate(r));assert.equal(recovered,2);dispose();
+ doc.dispatchEvent(new Event('freeze'));doc.dispatchEvent(new Event('resume'));assert.equal(recovered,2);
+});
 function liveFixture(t){
  const live=new BrowserLive(),events=[];live.session={id:'continuity-test',title:'Test',status:'recording',sourceLanguage:'en',translationMode:'accurate',warnings:[],segments:[]};
  live.paused=false;live.hasRecorded=true;live.persist=async()=>{};live.turns={flush(){},push(){}};live.onmessage=({data})=>events.push(JSON.parse(data));t.after(()=>live.close());return {live,events};

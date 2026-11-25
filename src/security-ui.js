@@ -1,7 +1,9 @@
 import {accountId,exportLocalAccount,clearLocalAccount} from './storage.js';
 import {NEW_PASSWORD_MIN,MAX_PASSWORD,newPasswordError} from './password-policy.js';
+import {accountRequest} from './account-client.js';
+import {formFeedback} from './form-feedback.js';
 const $=id=>document.getElementById(id),receiptKey='classroom-deletion-receipt';
-async function call(path,body){const r=await fetch(path,{method:body?'POST':'GET',credentials:'same-origin',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,cache:'no-store'});const data=await r.json();if(!r.ok){const error=new Error(data.error?.message||'操作失败，请重试');error.status=r.status;throw error;}return data;}
+async function call(path,body){return accountRequest(path,{body});}
 const fields=form=>Object.fromEntries(new FormData(form));
 function saveFile(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
 function initPasswordVisibility(){
@@ -12,7 +14,9 @@ function initPasswordVisibility(){
  }
  for(const button of document.querySelectorAll('[data-toggle-password]'))button.addEventListener('click',()=>{const input=$(button.dataset.togglePassword);if(!input)return;const visible=input.type==='password';input.type=visible?'text':'password';button.textContent=visible?'隐藏':'显示';button.setAttribute('aria-label',visible?'隐藏密码':'显示密码');button.setAttribute('aria-pressed',String(visible));});
 }
-export function initAccountSecurity({locked,showMessage,setBusy}){
+export function initAccountSecurity({locked,showMessage:profileMessage,setBusy}){
+ let activeFeedback;
+ const showMessage=text=>{profileMessage(text);activeFeedback?.show(text);};
  initPasswordVisibility();
  for(const input of document.querySelectorAll('#change-password-form [name="newPassword"],#change-password-form [name="confirmation"],#reset-verify-form [name="newPassword"],#reset-verify-form [name="confirmation"]')){input.minLength=NEW_PASSWORD_MIN;input.maxLength=MAX_PASSWORD;}
  let emailEnabled=false,busy=false,resetId='',resetUsername='',accountUsername='',bindId='',deleting=false,refreshVersion=0;
@@ -35,8 +39,17 @@ export function initAccountSecurity({locked,showMessage,setBusy}){
   }
  }
  window.addEventListener('account-render',e=>{resetId='';resetUsername='';bindId='';$('reset-verify-form').hidden=true;$('bind-verify-form').hidden=true;refresh(e.detail);});
- async function run(form,operation){if(busy||locked())return;busy=true;setBusy(true);const buttons=Array.from(form.querySelectorAll('button'));buttons.forEach(b=>b.disabled=true);showMessage('正在处理…');try{await operation(fields(form));form.querySelectorAll('input[autocomplete="current-password"],input[autocomplete="new-password"]').forEach(i=>i.value='');}catch(e){showMessage(e.message);}finally{busy=false;setBusy(false);buttons.forEach(b=>b.disabled=false);}}
- $('change-password-form').onsubmit=e=>{e.preventDefault();run(e.currentTarget,async data=>{const error=newPasswordError(data.newPassword,accountUsername);if(error)throw new Error(error);if(data.newPassword!==data.confirmation)throw new Error('两次新密码不一致');await call('/api/account/password/change',data);location.assign('/profile?login=1&passwordChanged=1&next=security');});};
+ async function run(form,operation){
+  if(busy||locked())return;busy=true;activeFeedback=formFeedback(form);setBusy(true);let redirect;
+  const buttons=Array.from(form.querySelectorAll('button'));buttons.forEach(b=>b.disabled=true);showMessage('正在处理…');
+  try{const result=await operation(fields(form));redirect=result?.redirect;form.querySelectorAll('input[autocomplete="current-password"],input[autocomplete="new-password"]').forEach(i=>i.value='');}
+  catch(e){profileMessage(e.message);activeFeedback.show(e.message,{error:true,focus:true});}
+  finally{busy=false;activeFeedback=null;setBusy(false);buttons.forEach(b=>b.disabled=false);}
+  // Release the page's busy guard before an intentional navigation. Otherwise
+  // beforeunload can cancel a successful password change or account deletion.
+  if(redirect)location.assign(redirect);
+ }
+ $('change-password-form').onsubmit=e=>{e.preventDefault();run(e.currentTarget,async data=>{const error=newPasswordError(data.newPassword,accountUsername);if(error)throw new Error(error);if(data.newPassword!==data.confirmation)throw new Error('两次新密码不一致');await call('/api/account/password/change',data);showMessage('密码已修改，所有旧登录已失效，正在前往登录页…');return {redirect:'/profile?login=1&passwordChanged=1&next=security'};});};
  $('recovery-open').onclick=()=>{$('recovery-reset').hidden=!$('recovery-reset').hidden;};
  for(const purpose of ['reset','bind']){
   const send=$(purpose+'-send-form'),verify=$(purpose+'-verify-form');let retryAt=0;
@@ -63,7 +76,7 @@ export function initAccountSecurity({locked,showMessage,setBusy}){
   // Verify receipt storage before disabling the account so interruption is recoverable.
   localStorage.setItem(receiptKey+'-check','1');localStorage.removeItem(receiptKey+'-check');const id=accountId();
   const receipt={jobId:crypto.randomUUID(),receipt:Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join(''),owner:id};localStorage.setItem(receiptKey,JSON.stringify(receipt));
-  try{await call('/api/account/delete',{...data,deletionJobId:receipt.jobId,deletionReceipt:receipt.receipt});}catch(error){if(error.status>=400&&error.status<500)localStorage.removeItem(receiptKey);throw error;}await clearLocalAccount(id);location.assign('/profile/data?deleting=1');
+  try{await call('/api/account/delete',{...data,deletionJobId:receipt.jobId,deletionReceipt:receipt.receipt});}catch(error){if(error.status>=400&&error.status<500)localStorage.removeItem(receiptKey);throw error;}await clearLocalAccount(id);showMessage('账号已停用，正在进入数据清理页面…');return {redirect:'/profile/data?deleting=1'};
  });};
  $('deletion-retry').onclick=resume;resume();
  if(new URLSearchParams(location.search).has('passwordChanged'))showMessage('密码已修改，所有旧登录已失效，请重新登录。');

@@ -1,4 +1,5 @@
 import {collectTranslation} from './text-stream.js';
+import {serviceMessage} from './errors.js';
 import {cachedSummaryGenerator} from './summary-cache.js';
 import {generateSummary} from './summary-content.js';
 import {accountId} from './storage.js';
@@ -36,8 +37,8 @@ export async function generateText(key, instructions, input, {fetcher = fetch, m
     const data = await res.json();
     if (!res.ok) {
       if ((res.status === 429 || res.status >= 500) && attempt < 2) { await new Promise(r => setTimeout(r, 1000 * 2 ** attempt)); continue; }
-      const details = String(data.error?.message || '').replace(/sk-[A-Za-z0-9_-]+/g, '[已隐藏]');
-      throw new Error(res.status === 401 ? '会员登录已失效，请重新登录并检查会员状态。' : `OpenAI 请求失败（${res.status}）：${details.slice(0,300)}`);
+      const details = String(serviceMessage(data.error) || `翻译请求失败（${res.status}），请稍后重试。`).replace(/sk-[A-Za-z0-9_-]+/g, '[已隐藏]');
+      throw new Error(details.slice(0,300));
     }
     if (data.status === 'incomplete') throw new Error('生成内容超出长度限制，请重试。');
     const text = data.output?.flatMap(x => x.content || []).filter(x => x.type === 'output_text').map(x => x.text).join('\n');
@@ -46,13 +47,21 @@ export async function generateText(key, instructions, input, {fetcher = fetch, m
   }
 }
 export async function translateSegment(s,key,source,context='',generate=generateText,sourceLanguage=s.sourceLanguage,onDelta,sourceRow) {
+  const owner=accountId();
   const reference=await referenceContext(s,source+' '+context);
+  if(owner!==accountId())throw new Error('登录账号已变化，请重新打开课堂后翻译。');
   const translatedContext=s.segments.filter(r=>r.translation?.trim()).slice(-6).map(r=>'原文：'+r.source+'\n译文：'+r.translation).join('\n').slice(-4000);
   const row=sourceRow?.source===source?sourceRow:s.segments.filter(r=>r.source===source).at(-1);
   const parts=row?.sourceParts?.length?row.sourceParts:row?[row]:[];
   const sourceProofs=parts.filter(p=>typeof p.audioProof==='string'&&p.audioProof).map(p=>({source:p.source,proof:p.audioProof}));
   const translation=await generate(key,TRANSLATION_INSTRUCTIONS,`课程：${s.title}\n专业背景（仅作术语参考）：${majorName(s.major)}\n已译上下文（保持术语一致）：\n${translatedContext||'暂无'}\n输入语言设置：${language(sourceLanguage).label}；输出必须为简体中文。\n上文：${context}\n参考资料（仅供术语参考）：\n${reference.text||'未导入资料'}\n当前片段：${source}`,{maxTokens:1800,onDelta,...(sourceProofs.length?{sourceProofs,translationSource:source}:{})});
   return {translation,references:reference.references};
+}
+export const canRetryTranslation=row=>Boolean(row?.source?.trim()&&(row.state==='failed'||(row.error&&row.state!=='translating')));
+export function translateRow(session,key,row,onDelta){
+  const index=session.segments.indexOf(row);
+  const context=session.segments.slice(Math.max(0,index-2),index).map(part=>part.source).join('\n');
+  return translateSegment(session,key,row.source,context,undefined,row.sourceLanguage,onDelta,row);
 }
 export async function summarize(s,key,generate=generateText) {
   const owner=accountId(),documents=await activeMaterials(s);
@@ -73,7 +82,7 @@ export async function summarize(s,key,generate=generateText) {
     });
     const data=await response.json();
     if(!response.ok){
-      const details=String(data.error?.message||'总结服务暂不可用，请稍后重试。').replace(/sk-[A-Za-z0-9_-]+/g,'[已隐藏]');
+      const details=String(serviceMessage(data.error)||'总结服务暂不可用，请稍后重试。').replace(/sk-[A-Za-z0-9_-]+/g,'[已隐藏]');
       throw new Error(response.status===401?'会员登录已失效，请重新登录并检查会员状态。':details.slice(0,300));
     }
     if(typeof data.summary!=='string'||!data.summary.trim())throw new Error('未返回完整的总结，请重试。');
@@ -86,7 +95,7 @@ export async function summarize(s,key,generate=generateText) {
 
 export function referenceManifest(s) {
   const sources=s.summarySources||sourceList(s);
-  return (s.summaryStale?'提示：资料已变化，当前总结基于之前的资料，请重新生成总结。\n\n':'')+(sources.length?'参考资料：\n'+sources.map(m=>`- ${m.name}（${m.pageCount} 页/段）${m.warnings?.length?'；'+m.warnings.join('；'):''}`).join('\n'):'');
+  return (s.summaryStale?'提示：课堂内容已更新，请重新生成总结以纳入最新字幕和资料。\n\n':'')+(sources.length?'参考资料：\n'+sources.map(m=>`- ${m.name}（${m.pageCount} 页/段）${m.warnings?.length?'；'+m.warnings.join('；'):''}`).join('\n'):'');
 }
 
 // PCM16 mono at 24 kHz. Keep a short pre-roll and commit after 1.2 seconds of silence or 8 seconds.
@@ -101,9 +110,16 @@ export class AudioTurns {
       this.pre.push(buffer); if (this.pre.length > 3) this.pre.shift();
       if (!voiced) return;
       this.active = true;
-      for (const b of this.pre) { this.append(b); this.samples += b.length / 2; }
+      this.samples = this.pre.reduce((total, chunk) => total + chunk.length / 2, 0);
+    } else {
+      this.samples += buffer.length / 2;
+      if (this.pre.length) this.pre.push(buffer); else this.append(buffer);
+    }
+    // Once sent, PCM cannot be withdrawn from the upstream turn on pause.
+    if (this.pre.length && this.samples >= 2400) {
+      for (const chunk of this.pre) this.append(chunk);
       this.pre = [];
-    } else { this.append(buffer); this.samples += buffer.length / 2; }
+    }
     this.silent = voiced ? 0 : this.silent + buffer.length / 2;
     if (this.silent >= this.silenceSamples || this.samples >= this.maxTurnSamples) this.flush();
   }

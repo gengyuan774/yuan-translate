@@ -11,7 +11,7 @@ import {digest} from '../src/security-common.js';
 import {historyRoute} from '../src/history-server.js';
 import {serviceState,acquireLease,releaseLease,reserve,settle,myUsage,beginSummary,finishSummary} from '../src/service-ledger.js';
 
-const password='Isolated trial fixture password';
+const password='Isolated trial fixture password 7';
 const cookie=result=>result.cookie.split(';')[0];
 async function passwordRegistration(env,username){const challenge=await mintRegistration(env,username),data={username,password,registration:challenge.registration};return passwordAccount(req('/api/account/register/password',data,challenge.cookie,challenge.headers),env,data,true);}
 

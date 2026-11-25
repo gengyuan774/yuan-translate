@@ -6,7 +6,7 @@ import {handle} from '../src/worker.js';
 import {hashPassword} from '../src/password-server.js';
 import {issueAccountSession,accountUser} from '../src/account-server.js';
 import {digest} from '../src/security-common.js';
-const password='Original-password-123',next='New-password-456',token='ef'.repeat(32);
+const password='Original-password-123',next='Lake#Day',token='ef'.repeat(32);
 function request(path,body,cookie='',headers={}){return new Request('https://example.test'+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',Cookie:cookie,'CF-Connecting-IP':'127.0.0.1',...headers},body:body?JSON.stringify(body):undefined});}
 async function fixture(){
  const f=environment(),objects=new Map();f.env.MEMBER_ADMIN_TOKEN_SHA256=await digest(token);

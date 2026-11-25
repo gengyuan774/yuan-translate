@@ -1,10 +1,9 @@
 // Administrative CLI. The credential stays in an ignored local file, never in arguments or output.
-import {readFileSync} from 'node:fs';
+import {loadAdminConfig} from './admin-config.mjs';
 const [username,tier,expiresAt,reason]=process.argv.slice(2);
 if(!username){console.error('Usage: node scripts/member-admin.mjs username [regular|premium|none ISO-UTC-expiry reason]');process.exit(1);}
-const secret=readFileSync(new URL('../.env.member-admin',import.meta.url),'utf8').match(/^MEMBER_ADMIN_TOKEN=([a-f0-9]{64})$/m)?.[1];
-if(!secret)throw new Error('Local administrator credential missing');
-const url='https://classroom-notes-gengyuan.xiangyuguan.chatgpt.site/api/admin/membership';
+const {secret,origin}=loadAdminConfig();
+const url=origin+'/api/admin/membership';
 const headers={Authorization:'Bearer '+secret,'Content-Type':'application/json'};
 async function call(endpoint,options={}){
  const response=await fetch(endpoint,{...options,headers,redirect:'error',signal:AbortSignal.timeout(30000)});

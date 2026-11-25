@@ -7,7 +7,7 @@ import {createVerifiedAccountSession} from '../src/account-server.js';
 import {handle} from '../src/worker.js';
 import {digest} from '../src/security-common.js';
 import {reserve,settle,myUsage,acquireLease,releaseLease,recoverExpired,serviceBudgetState,serviceState} from '../src/service-ledger.js';
-import {MeteredAudio} from '../src/realtime-relay.js';
+import {MeteredAudio,realtimeRelay,safeSession} from '../src/realtime-relay.js';
 import {textCost,audioCost,PERIOD_MS} from '../src/service-plans.js';
 async function fixture(){
  const f=environment(),{env}=f;env.MEMBER_DAILY_TEXT_LIMIT='5000';
@@ -22,6 +22,21 @@ async function fixture(){
  const configure=async(overrides={})=>{const response=await admin('/api/admin/costs/settings',{warningCents:null,hardCents:null,paused:false,expectedRevision:(await serviceBudgetState(env)).revision,reason:'isolated test',...overrides});assert.equal(response.status,200,await response.clone().text());return response.json();};
  return {...f,account:a.user,cookie,request,api,admin,configure};
 }
+test('admin reads ten accounts together without mixing usage or changing their balances',async()=>{
+ const f=await fixture(),expected=new Map();
+ for(let i=0;i<9;i++){
+  const a=await createVerifiedAccountSession(f.env,{provider:'email',subject:'admin-list-'+i+'@example.test',label:'account-'+i});
+  await handle(req('/api/member/login',{code:'test-member-code'},a.cookie.split(';')[0]),()=>{throw Error('No provider calls');},f.env);
+  await myUsage(req('/',undefined,a.cookie.split(';')[0]),f.env);
+  f.sql.prepare('UPDATE plan_balances SET audio_used=? WHERE account_id=?').run((i+1)*60000,a.user.id);expected.set(a.user.id,i+1);
+ }
+ expected.set(f.account.id,0);
+ const result=await f.admin('/api/admin/costs');assert.equal(result.status,200);const data=await result.json();
+ assert.equal(data.accounts.length,10);assert.equal(data.next,null);
+ assert.deepEqual(data.accounts.map(a=>a.id),[...expected.keys()].sort());
+ for(const account of data.accounts){assert.equal(account.usage.usedMinutes,expected.get(account.id));assert.equal(account.membership.tier,'regular');}
+ for(const row of f.sql.prepare('SELECT account_id,audio_used FROM plan_balances').all())assert.equal(row.audio_used/60000,expected.get(row.account_id));
+});
 test('commercial plans publish 30/80 prices and enforce 30 hours plus 10 summaries by default',async()=>{
  const f=await fixture();const usage=await myUsage(f.request,f.env);
  assert.equal(usage.quotaEnforced,true);assert.equal(usage.minutes,1800);assert.equal(usage.summaries,10);
@@ -118,16 +133,16 @@ test('old ephemeral token endpoint cannot bypass the relay or expose a reusable 
  const f=await fixture();let called=false;const r=await handle(req('/api/openai/token',{sourceLanguage:'en'},f.cookie,{'X-Access-Mode':'member'}),()=>{called=true;},f.env);assert.equal(r.status,410);assert.equal(called,false);
 });
 
-test('relay freezes server settings, filters provider secrets, stops blocked accounts and closes both sockets',async()=>{
- const {realtimeRelay,safeSession}=await import('../src/realtime-relay.js');const f=await fixture();
- class Socket{
+class Socket{
   constructor(){this.readyState=1;this.sent=[];this.listeners={};}
   accept(){this.accepted=true;}
   addEventListener(type,handler){(this.listeners[type]??=[]).push(handler);}
-  send(data){this.sent.push(JSON.parse(data));}
+  send(data){if(this.readyState!==1)throw Error('socket closed');this.sent.push(JSON.parse(data));}
   fire(type,data){for(const handler of this.listeners[type]||[])handler({data:typeof data==='string'?data:JSON.stringify(data)});}
   close(){if(this.readyState===3)return;this.readyState=3;this.fire('close','');}
- }
+}
+test('relay freezes server settings, filters provider secrets, stops blocked accounts and closes both sockets',async()=>{
+ const f=await fixture();
  const upstream=new Socket(),server=new Socket(),client=new Socket();let authorization;
  const request=new Request('https://example.test/api/openai/realtime?language=en&mode=fast',{headers:{Cookie:f.cookie,Upgrade:'websocket',Origin:'https://example.test'}});
  const result=await realtimeRelay(request,f.env,async(url,init)=>{assert.equal(url,'https://api.openai.com/v1/realtime?intent=transcription');authorization=init.headers.Authorization;return {webSocket:upstream};},{pairFactory:()=>({0:client,1:server}),upgrade:socket=>({status:101,webSocket:socket})});
@@ -142,6 +157,82 @@ test('relay freezes server settings, filters provider secrets, stops blocked acc
  for(let i=0;i<10&&server.readyState!==3;i++)await tick();assert.equal(upstream.sent.length,1);assert.equal(server.readyState,3);assert.equal(upstream.readyState,3);
  for(let i=0;i<10&&f.sql.prepare('SELECT lease_id FROM service_accounts').get().lease_id;i++)await tick();assert.equal(f.sql.prepare('SELECT lease_id FROM service_accounts').get().lease_id,null);
  assert.throws(()=>safeSession({session:{audio:{input:{transcription:{model:'expensive-untrusted-model'}}}}},'x','fast'),e=>e.status===400);
+});
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+async function waitFor(check){
+ const deadline=performance.now()+3000;
+ while(!check()){assert.ok(performance.now()<deadline,'timed out waiting for the relay');await tick();}
+}
+async function openRecording(t,f){
+ const source=new Socket(),server=new Socket(),client=new Socket(),cleanup=[];
+ const request=new Request('https://example.test/api/openai/realtime',{headers:{Cookie:f.cookie,Upgrade:'websocket',Origin:'https://example.test'}});
+ await realtimeRelay(request,f.env,async()=>({webSocket:source}),{pairFactory:()=>[client,server],upgrade:()=>({status:101}),waitUntil:task=>cleanup.push(task)});
+ t.after(async()=>{server.close();await Promise.all(cleanup);});
+ server.fire('message',{type:'session.update',session:{audio:{input:{transcription:{model:'gpt-transcribe',languages:['en']}}}}});
+ await waitFor(()=>source.sent.length>0);
+ return {source,server,cleanup};
+}
+test('a 17-minute classroom drains delayed microphone frames in order and keeps translating',async t=>{
+ const f=await fixture();
+ let now=Date.now();t.mock.method(Date,'now',()=>now);t.mock.timers.enable({apis:['setInterval']});
+ const {source,server}=await openRecording(t,f);
+ const frame={type:'input_audio_buffer.append',audio:Buffer.alloc(4800).toString('base64')};
+ const turn=()=>{for(let i=0;i<80;i++){now+=100;t.mock.timers.tick(100);server.fire('message',frame);}server.fire('message',{type:'input_audio_buffer.commit'});};
+ const complete=id=>{
+  source.fire('message',{type:'input_audio_buffer.committed',item_id:id});
+  source.fire('message',{type:'conversation.item.input_audio_transcription.completed',item_id:id,transcript:'Test sentence.'});
+ };
+ const received=id=>server.sent.some(event=>event.item_id===id&&event.audioProof);
+ for(let i=0;i<125;i++){
+  source.sent.length=0;turn();await waitFor(()=>source.sent.at(-1)?.type==='input_audio_buffer.commit');
+  const id='turn-'+i;complete(id);await waitFor(()=>received(id));
+ }
+ // Delay a real reservation while another 24 seconds of the original client's
+ // 100 ms packets arrive. No audio may reach the provider before admission.
+ const batch=f.env.DB.batch.bind(f.env.DB);let hold=true,release;
+ t.mock.method(f.env.DB,'batch',async items=>{
+  if(hold){hold=false;await new Promise(resolve=>{release=resolve;});}
+  return batch(items);
+ });
+ source.sent.length=0;
+ // Enter the reservation before advancing the clock over the next lease check.
+ server.fire('message',frame);server.fire('message',{type:'input_audio_buffer.commit'});
+ await waitFor(()=>release);
+ try{turn();turn();turn();assert.equal(source.sent.length,0);}finally{release();}
+ const commits=()=>source.sent.filter(event=>event.type==='input_audio_buffer.commit').length;
+ await waitFor(()=>commits()===3);complete('delayed-0');await waitFor(()=>commits()===4);
+ for(let i=1;i<4;i++)complete('delayed-'+i);
+ await waitFor(()=>received('delayed-3'));
+ assert.equal(source.sent.filter(event=>event.type===frame.type).length,241);
+ assert.equal(f.sql.prepare('SELECT audio_used FROM plan_balances').get().audio_used,1024100);
+ assert.equal(f.sql.prepare('SELECT restricted_until FROM service_accounts').get().restricted_until,0);
+ assert.equal(server.readyState,1);
+ const response=await handle(f.request,async()=>Response.json({output:[{content:[{type:'output_text',text:'这是对的。'}]}]}),f.env);
+ assert.equal(response.status,200);assert.match(await response.text(),/这是对的/);
+});
+test('a full connection queue requests reconnection and releases the lease without restricting the account',async t=>{
+ const f=await fixture(),{source,server,cleanup}=await openRecording(t,f);
+ // A burst of normal 100 ms packets may arrive together after a network stall.
+ const frame={type:'input_audio_buffer.append',audio:Buffer.alloc(4800).toString('base64')};
+ for(let i=0;i<550;i++)server.fire('message',frame);
+ await Promise.all(cleanup);
+ assert.equal(server.sent.at(-1).error.retryable,true);assert.equal(source.readyState,3);
+ assert.equal(f.sql.prepare('SELECT restricted_until FROM service_accounts').get().restricted_until,0);
+ assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM security_audit WHERE action=?').get('service_abuse_restriction').n,0);
+ assert.deepEqual(await (await f.api('/api/openai/status')).json(),{available:true});
+});
+test('invalid frame sizes restrict once and the translation and recording errors carry the same recovery time',async t=>{
+ const f=await fixture(),{server,cleanup}=await openRecording(t,f);
+ for(let i=0;i<3;i++)server.fire('message',' '.repeat(110001));
+ await Promise.all(cleanup);
+ const {restricted_until:until}=f.sql.prepare('SELECT restricted_until FROM service_accounts').get();
+ assert.ok(until>Date.now());assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM security_audit WHERE action=?').get('service_abuse_restriction').n,1);
+ assert.equal(server.sent.at(-1).error.retryable,false);
+ const response=await handle(f.request,()=>assert.fail('a restricted request must stop locally'),f.env);
+ assert.equal(response.status,403);
+ const {error}=await response.json();assert.equal(error.code,'account_restricted');assert.equal(error.retryAt,until);
+ assert.deepEqual(await (await f.api('/api/openai/status')).json(),{available:false,...error});
+ t.mock.method(Date,'now',()=>until);assert.deepEqual(await (await f.api('/api/openai/status')).json(),{available:true});
 });
 test('automatic reconnect can replace its own lease without allowing two audio senders or interrupting another browser',async()=>{
  const f=await fixture(),owner=crypto.randomUUID();const request=new Request('https://example.test/api/openai/realtime?owner='+owner,{headers:{Cookie:f.cookie}});

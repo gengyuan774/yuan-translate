@@ -15,6 +15,30 @@ import {createVerifiedAccountSession} from '../src/account-server.js';
 const tick=()=>new Promise(r=>setTimeout(r,5));
 const until=async predicate=>{for(let i=0;i<200;i++){if(await predicate())return;await tick();}throw Error('Timed out');};
 const encode=e=>new TextEncoder().encode('data: '+JSON.stringify(e)+'\r\n\r\n');
+test('cancelling immediately before the first pull closes upstream and finishes once',async()=>{
+ const settled=[];let cancelled=false;
+ const body=new ReadableStream({cancel(){cancelled=true;}});
+ await translationStream(body,{finish:value=>settled.push(value)}).cancel();
+ assert.equal(cancelled,true);assert.deepEqual(settled,[{success:false,usage:null}]);
+});
+test('disconnecting during a silent upstream read releases the translation immediately and accounts once',async()=>{
+ let upstream,cancelled=false;const settled=[];
+ const body=new ReadableStream({start(c){upstream=c;},cancel(){cancelled=true;}});
+ const reader=translationStream(body,{finish:async value=>settled.push(value)}).getReader();
+ upstream.enqueue(encode({type:'response.output_text.delta',delta:'半句'}));await reader.read();
+ const pending=reader.read();await new Promise(resolve=>setImmediate(resolve));
+ const cancellation=reader.cancel();await new Promise(resolve=>setImmediate(resolve));
+ try{assert.equal(cancelled,true);assert.deepEqual(settled,[{success:false,usage:null}]);}
+ finally{if(!cancelled)upstream.close();await Promise.all([pending,cancellation]);}
+});
+test('a completed translation waits for its usage to be finalized before it is delivered',async()=>{
+ const gate=Promise.withResolvers(),body=channel(),seen=[];let delivered=false;
+ const reader=translationStream(body.body,{finish:async info=>{seen.push(info);await gate.promise;}}).getReader();
+ body.send({type:'response.completed',response:{status:'completed',output:[{content:[{type:'output_text',text:'完成'}]}],usage:{output_tokens:2}}});body.end();
+ const output=reader.read().then(result=>{delivered=true;return result;});await new Promise(resolve=>setImmediate(resolve));
+ try{assert.equal(delivered,false);assert.deepEqual(seen,[{success:true,usage:{output_tokens:2}}]);}
+ finally{gate.resolve();await output;await reader.cancel();}
+});
 function channel(){let controller;return {body:new ReadableStream({start(c){controller=c;}}),send:e=>controller.enqueue(encode(e)),end:()=>controller.close()};}
 const session=id=>({id,title:'课堂',createdAt:new Date().toISOString(),segments:[],materials:[],warnings:[],status:'recording',summary:'',sourceLanguage:'en'});
 test('SSE shows Chinese before completion, survives byte-split UTF8, and never exposes provider errors',async()=>{

@@ -1,4 +1,5 @@
 import {MemberError} from './errors.js';
+import {usernameError} from './password-policy.js';
 
 const COOKIE='__Host-classroom_signup',CHALLENGE_MS=5*60000,MIN_WAIT_MS=750,DIFFICULTY=18;
 const encoder=new TextEncoder();
@@ -10,7 +11,7 @@ const cookieValue=request=>request.headers.get('Cookie')?.split(';').map(s=>s.tr
 
 export function registrationUsername(value){
  const username=typeof value==='string'?value.trim().toLowerCase():'';
- if(!/^[a-z0-9_][a-z0-9_.-]{3,31}$/.test(username))throw new MemberError('账号需为 4–32 位英文字母、数字、下划线、点或短横线，不能以点或短横线开头。',400);
+ const error=usernameError(value);if(error)throw new MemberError(error,400);
  return username;
 }
 function ipv4(value){

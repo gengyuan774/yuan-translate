@@ -20,10 +20,14 @@ export async function verifyPassword(password,stored){
  let diff=0;for(let i=0;i<64;i++)diff|=actual.charCodeAt(i)^expected.charCodeAt(i);return valid&&diff===0;
 }
 function credentials(data,register){
- const username=registrationUsername(data.username);
- if(typeof data.password!=='string'||data.password.length<8||data.password.length>128)throw new MemberError('密码需为 8–128 位，区分大小写。',400);
- if(register){const message=newPasswordError(data.password,username);if(message)throw new MemberError(message,400);}
- return {username,password:data.password};
+ const username=registrationUsername(data.username),password=data.password;
+ if(register){
+  const message=newPasswordError(password,username);
+  if(message)throw new MemberError(message,400);
+ }else if(typeof password!=='string'||password.length<8||password.length>128){
+  throw new MemberError('密码需为 8–128 位，区分大小写。',400);
+ }
+ return {username,password};
 }
 export async function passwordAccount(request,env,data,register=false){
  const {username,password}=credentials(data,register);await authRate(request,env,register?'register':'login',username);

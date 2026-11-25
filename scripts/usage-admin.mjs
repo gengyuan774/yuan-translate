@@ -1,11 +1,8 @@
 // Existing administrator credential stays local; it is never passed to a browser.
-import {readFileSync} from 'node:fs';
+import {loadAdminConfig} from './admin-config.mjs';
 import {spawn} from 'node:child_process';
 const [command='status',...args]=process.argv.slice(2);
-const secret=readFileSync(new URL('../.env.member-admin',import.meta.url),'utf8').match(/^MEMBER_ADMIN_TOKEN=([a-f0-9]{64})$/m)?.[1];
-if(!secret)throw Error('Local administrator credential missing');
-const origin=process.env.SERVICE_ADMIN_ORIGIN||'https://www.yuantranslate.com';
-if(new URL(origin).protocol!=='https:'&& !/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin))throw Error('Use HTTPS');
+const {secret,origin}=loadAdminConfig();
 async function api(path,body){const r=await fetch(origin+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+secret,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined,redirect:'error',signal:AbortSignal.timeout(30000)});const d=await r.json();if(!r.ok)throw Error(d.error?.message||'Request failed');return d;}
 if(command==='open'){
  const {ticket}=await api('/api/admin/cost-session',{});const url=origin+'/admin/usage#ticket='+encodeURIComponent(ticket);

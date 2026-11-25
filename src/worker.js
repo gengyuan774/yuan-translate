@@ -1,4 +1,5 @@
 import {createRegistrationChallenge} from './registration-security.js';
+import {AccountRestriction} from './errors.js';
 import {verifyTrialTranslation} from './audio-proof.js';
 import {summarizeService} from './summary-service.js';
 import {TRANSLATION_INSTRUCTIONS} from './translation-prompt.js';
@@ -133,7 +134,7 @@ export async function handle(request,upstream=fetch,env={},runtime={}){
    const usage=await myUsage(request,env);
    if(usage.minutes!==null&&usage.remainingMinutes<=0)return reply({available:false,code:'translation_quota_exhausted',message:usage.tier==='trial'?'1 小时免费翻译已用完，请开通会员继续。':'本期 30 小时翻译额度已用完，请等待下期重置或联系客服。'});
    if(usage.paused)return reply({available:false,code:'service_paused',message:'本站已暂停新增 AI 消耗，请稍后再试。'});
-   if(usage.restrictedUntil>Date.now())return reply({available:false,code:'account_restricted',message:'账号服务暂时受限，请在个人中心查看。'});
+   if(usage.restrictedUntil>Date.now())return reply({available:false,...new AccountRestriction(usage.restrictedUntil).toJSON()});
    return reply(await recordingAvailability(request,env));
   }
   if(!['/api/openai/responses','/api/openai/token'].includes(url.pathname))return reply({error:{message:'Not found'}},404);
@@ -153,6 +154,9 @@ export async function handle(request,upstream=fetch,env={},runtime={}){
   await verifyTrialTranslation(env,member,data);
   await allowSharedRequest(request,env,'text',(data.input?.length||0)+(data.instructions?.length||0));
   return await meteredText(request,env,payload,upstream);
- }catch(error){return reply({error:{message:error instanceof MemberError?error.message:'请求处理失败或服务暂不可用，请稍后重试。'}},error instanceof MemberError?error.status:503);}
+ }catch(error){
+  if(error instanceof MemberError)return reply({error:error.toJSON()},error.status);
+  return reply({error:{message:'请求处理失败或服务暂不可用，请稍后重试。'}},503);
+ }
 }
 export default {fetch(request,env,ctx){return handle(request,fetch,env,ctx?.waitUntil?{waitUntil:task=>ctx.waitUntil(task)}:{});}};

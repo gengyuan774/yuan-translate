@@ -11,6 +11,25 @@ function batchClock(t){
  t.mock.method(globalThis,'clearTimeout',id=>{if(!timers.delete(id))nativeClear(id);});
  return {timers,fire(){const [id,fn]=timers.entries().next().value;timers.delete(id);fn();}};
 }
+for(const status of [503,409])test('reopening a completed classroom '+(status===503?'resumes a temporary upload failure':'keeps a version conflict paused'),async t=>{
+ const owner=crypto.randomUUID(),id=crypto.randomUUID();setAccount({id:owner});
+ const timers=new Set(),nativeSet=globalThis.setTimeout,nativeClear=globalThis.clearTimeout;
+ t.mock.method(globalThis,'setTimeout',(fn,ms,...args)=>{if(ms!==5000&&ms!==30000)return nativeSet(fn,ms,...args);const item={fn,unref(){}};timers.add(item);return item;});
+ t.mock.method(globalThis,'clearTimeout',id=>{if(!timers.delete(id))nativeClear(id);});
+ let online=false,writes=0;
+ t.mock.method(globalThis,'fetch',async(_path,{method})=>{
+  if(method==='GET')return Response.json([]);
+  writes++;return online?Response.json({revision:1}):Response.json({error:{message:'延迟保存'}},{status});
+ });
+ const reopened=await import('../src/storage.js?tab='+id);
+ try{
+  await assert.rejects(saveSession({...lesson(id),status:'completed'}));setAccount(null);timers.clear();online=true;
+  reopened.setAccount({id:owner});assert.equal((await reopened.listSessions())[0].id,id);
+  assert.equal(timers.size,status===503?1:0);
+  if(status===503){[...timers][0].fn();await until(async()=>!await reopened.sessionSyncPending(id));assert.equal(writes,2);}
+  else assert.equal(writes,1);
+ }finally{await clearLocalAccount(owner);await reopened.clearLocalAccount(owner);reopened.setAccount(null);setAccount(null);}
+});
 test('live saves are local immediately and batch the latest snapshot without continuous upload; pause flushes',async t=>{
  const clock=batchClock(t),writes=[];let release;
  setAccount({id:'batch-live'});

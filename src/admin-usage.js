@@ -1,10 +1,11 @@
 const $=id=>document.getElementById(id),fmt=v=>Number(v||0).toLocaleString('zh-CN',{maximumFractionDigits:2}),date=v=>v?new Date(v).toLocaleString('zh-CN'):'—';
 let current=null,target=null,next=null,busy=false,configDirty=false;
 $('budget-form').oninput=()=>configDirty=true;
-async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,cache:'no-store',credentials:'same-origin'});const d=await r.json();if(!r.ok)throw Error(d.error?.message||'管理请求失败');return d;}
+async function api(path,body){try{const r=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(60000)});const d=await r.json();if(!r.ok)throw Error(d.error?.message||'管理请求失败');return d;}catch(error){if(['TimeoutError','AbortError'].includes(error.name))throw Error(body?'请求超时，请先刷新核对结果，再决定是否重试':'读取超时，请刷新重试');throw error;}}
 function message(value){$('admin-message').textContent=value;}
 async function refresh(after=''){
  if(busy)return;busy=true;
+ message('正在读取账号和用量，请稍候…');
  try{const result=await api('/api/admin/costs?username='+encodeURIComponent($('search').value.trim())+(after?'&after='+encodeURIComponent(after):''));
   const b=result.budget;current=b;$('admin-body').hidden=false;$('spent').textContent='¥'+fmt(b.spentCny);$('reserved').textContent='¥'+fmt(b.reservedCny);$('service-state').textContent=b.paused?'已停止':b.hardCents!==null&&(b.spentCny+b.reservedCny)*100>=b.hardCents?'预算已达上限':'可使用';
   if(!configDirty&&!$('budget-form').contains(document.activeElement)){$('warning').value=b.warningCents===null?'':b.warningCents/100;$('hard').value=b.hardCents===null?'':b.hardCents/100;$('paused').value=String(b.paused);}

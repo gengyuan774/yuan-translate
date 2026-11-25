@@ -1,11 +1,17 @@
 import {issueAudioProof} from './audio-proof.js';
-import {MemberError} from './errors.js';
+import {AccountRestriction,MemberError} from './errors.js';
 import {allowSharedRequest} from './member.js';
 import {validLanguage,transcriptionConfig} from './languages.js';
 import {openTranscription} from './realtime-connection.js';
 import {restrictAbuse} from './service-admin.js';
 import {validTranslationMode} from './models.js';
 import {acquireLease,releaseLease,renewLease,reserve,settle,settings,serviceBudgetState,recordingAvailability} from './service-ledger.js';
+// The recorder sends 100 ms frames and can replay up to 45 seconds on renewal.
+// Bound retained work independently of how quickly the database can admit a turn.
+const MAX_QUEUED_MESSAGES=512;
+const MAX_QUEUED_CHARS=3*1024*1024;
+const congestionMessage='语音处理暂时拥堵，正在重新连接。';
+class RelayCongestion extends Error{}
 // Audio is held locally for at most one turn. Nothing billable is forwarded
 // before both quota and full-turn cost have been atomically reserved.
 export class MeteredAudio{
@@ -18,10 +24,19 @@ export class MeteredAudio{
  }
  async commit(){
   if(!this.bytes)return;
-  if(this.pending.size>=3)throw new MemberError('语音识别积压，请暂停后重新连接。',429);
+  // Commits are serialized. Give an in-flight transcription time to finish
+  // when delayed microphone frames arrive together.
+  if(this.pending.size>=3){
+   let timer;
+   try{await new Promise(resolve=>{this.wakeCommit=resolve;timer=setTimeout(resolve,10000);});}
+   finally{clearTimeout(timer);this.wakeCommit=null;}
+   if(this.inputStopped)return;
+   if(this.pending.size>=3)throw new RelayCongestion(congestionMessage);
+  }
   // Bound accelerated uploads, while allowing a short reconnection backlog.
   if((this.sentSamples+this.bytes/2)/24000>(Date.now()-this.started)/1000+45){const error=new MemberError('语音发送异常，已停止连接。',429);error.abuse=true;throw error;}
   const row=await reserve(this.request,this.env,{kind:'audio',audioMs:Math.ceil(this.bytes/48),lease:this.lease});
+  if(this.inputStopped){await settle(this.env,row);return;}
   this.pending.add(row);this.uncommitted.push(row);this.sentSamples+=this.bytes/2;
   try{for(const audio of this.chunks)this.send({type:'input_audio_buffer.append',audio});this.send({type:'input_audio_buffer.commit'});}
   catch(error){await settle(this.env,row,{providerAccepted:true});this.pending.delete(row);throw error;}
@@ -35,13 +50,19 @@ export class MeteredAudio{
   if(['conversation.item.input_audio_transcription.completed','conversation.item.input_audio_transcription.failed'].includes(event.type)){
    const row=this.items.get(event.item_id);
    if(row){
-    const completed=await settle(this.env,row,{success:event.type.endsWith('.completed'),providerAccepted:true});this.pending.delete(row);this.items.delete(event.item_id);
+    const completed=await settle(this.env,row,{success:event.type.endsWith('.completed'),providerAccepted:true});this.pending.delete(row);this.items.delete(event.item_id);this.wakeCommit?.();
     if(event.type.endsWith('.completed')&&!completed){this.emit({type:'conversation.item.input_audio_transcription.failed',item_id:event.item_id});this.emit({type:'error',error:{message:'此段识别结果返回过晚，时长已返还，请重新录入此段。'}});return;}
     if(completed&&typeof event.transcript==='string'&&event.transcript.trim())event={...event,audioProof:await issueAudioProof(this.env,this.lease.accountId,row.id,event.transcript||'')};
    }else if(event.type.endsWith('.completed'))return;
   }
   if(event.type==='error'){
    // Do not publish arbitrary provider messages (they may contain credentials).
+   // A provider server failure can recover on a fresh connection. Preserve that
+   // classification while keeping authentication, quota and request errors fatal.
+   const permanent=['insufficient_quota','invalid_api_key','model_not_found','invalid_request_error','permission_denied'];
+   if(event.error?.type==='server_error'&&!permanent.includes(event.error?.code)){
+    this.emit({type:'error',error:{message:'语音识别服务暂时异常，正在尝试恢复。',code:'upstream_unavailable',retryable:true}});return;
+   }
    this.emit({type:'error',error:{message:'语音识别服务出现错误，未完成的额度会自动返还。'}});return;
   }
   // Explicitly allow only transcription events; never expose session metadata.
@@ -50,8 +71,9 @@ export class MeteredAudio{
    const {type,item_id,previous_item_id,delta,transcript,language,audioProof}=event;this.emit({type,item_id,previous_item_id,delta,transcript,language,...(audioProof?{audioProof}:{})});
   }
  }
+ stopInput(){this.inputStopped=true;this.wakeCommit?.();}
  async close(){
-  if(this.closed)return;this.closed=true;
+  if(this.closed)return;this.closed=true;this.stopInput();
   for(const row of this.pending)await settle(this.env,row,{providerAccepted:true});
   this.pending.clear();this.chunks=[];await releaseLease(this.env,this.lease);
  }
@@ -75,6 +97,7 @@ export async function realtimeRelay(request,env,upstream,runtime={}){
  if(!validLanguage(code)||!validTranslationMode(mode))throw new MemberError('语言或翻译模式不正确',400);
  await allowSharedRequest(request,env,'token');let lease;
  try{lease=await acquireLease(request,env);}catch(error){
+  if(error instanceof AccountRestriction)return rejectedSocket(runtime,error.toJSON());
   if(error instanceof MemberError&&error.status===409){const conflict=await recordingAvailability(request,env);if(conflict.code==='recording_busy')return rejectedSocket(runtime,conflict);}
   throw error;
  }
@@ -88,25 +111,41 @@ export async function realtimeRelay(request,env,upstream,runtime={}){
   return rejectedSocket(runtime,{message:error instanceof MemberError?error.message:'网站服务器暂时无法连接语音服务，请稍后重试。',code:error.diagnostic?.code});
  }
  const pair=runtime.pairFactory?runtime.pairFactory():new WebSocketPair(),client=pair[0],server=pair[1];server.accept();
- let closed=false,queue=Promise.resolve(),queued=0,eventQueue=Promise.resolve(),timer,configured=false;
+ let closed=false,queue=Promise.resolve(),queued=0,queuedChars=0,eventQueue=Promise.resolve(),timer,configured=false;
+ // A packet burst alone can be delayed microphone data. Compare total arrivals
+ // with elapsed capture time, allowing a full renewal backlog and control frames.
+ let receivedMessages=0;
  const emit=event=>{if(!closed&&server.readyState===1)server.send(JSON.stringify(event));};
  const audio=new MeteredAudio(request,env,lease,event=>socket.send(JSON.stringify(event)),emit);
- const close=(message,retryable=false)=>{const task=(async()=>{
-  if(closed)return;emit({type:'error',error:{message:message||'语音连接已结束，请重新连接。',retryable}});closed=true;clearInterval(timer);
+ const close=(message,retryable=false,restrictionReason)=>{if(closed)return;const task=(async()=>{
+  const problem=message instanceof MemberError?message.toJSON():{message:message||'语音连接已结束，请重新连接。'};
+  try{emit({type:'error',error:{...problem,retryable}});}catch{}
+  closed=true;clearInterval(timer);audio.stopInput();
   try{socket.close(1000,'closed');}catch{}try{server.close(1000,'closed');}catch{}
+  if(restrictionReason)await restrictAbuse(env,lease.accountId,restrictionReason).catch(()=>console.warn('realtime_restriction_failed'));
   await queue.catch(()=>{});await eventQueue.catch(()=>{});await audio.close();
  })();runtime.waitUntil?.(task.catch(()=>console.warn('realtime_cleanup_failed')));return task;};
  server.addEventListener('message',event=>{
-  if(closed)return;if(typeof event.data!=='string'||event.data.length>110000||++queued>100){void restrictAbuse(env,lease.accountId,'实时连接发送异常（频率或大小）').then(()=>close('发送异常，账号已临时限制 15 分钟。')).catch(()=>close('语音发送异常，已停止连接。'));return;}
+  if(closed)return;
+  const raw=event.data;
+  if(typeof raw!=='string'||raw.length>110000){void close('收到异常语音数据，已停止录音。',false,'实时连接发送了无效类型或超大消息');return;}
+  if(queued>=MAX_QUEUED_MESSAGES||queuedChars+raw.length>MAX_QUEUED_CHARS){void close(congestionMessage,true);return;}
+  const elapsedSeconds=Math.max(0,Date.now()-audio.started)/1000;
+  if(++receivedMessages>MAX_QUEUED_MESSAGES+20*elapsedSeconds){void close('录音消息发送过快，已停止连接。',false,'实时连接消息发送速率异常');return;}
+  queued++;queuedChars+=raw.length;
   queue=queue.then(async()=>{
-   if(closed)return;const data=JSON.parse(event.data);
+   if(closed)return;const data=JSON.parse(raw);
    if(data.type==='session.update'){
     socket.send(JSON.stringify(safeSession(data,title,mode)));configured=true;
    }else if(data.type==='connection.ping'&&configured)emit({type:'connection.pong'});
    else if(data.type==='input_audio_buffer.append'&&configured)await audio.append(data.audio);
    else if(data.type==='input_audio_buffer.commit'&&configured)await audio.commit();
    else throw new MemberError('不支持的语音请求。',400);
-  }).catch(error=>{if(error instanceof MemberError&&error.abuse===true)void restrictAbuse(env,lease.accountId,'语音积压或发送速度异常').catch(()=>{});void close(error instanceof MemberError?error.message:'实时服务暂不可用，请重新连接。');}).finally(()=>queued--);
+  }).catch(error=>{
+   if(error instanceof RelayCongestion)void close(error.message,true);
+   else if(error instanceof MemberError)void close(error,false,error.abuse?'语音上传速度超过实时录音范围':undefined);
+   else void close('实时服务暂不可用，请重新连接。');
+  }).finally(()=>{queued--;queuedChars-=raw.length;});
  });
  socket.addEventListener('message',event=>{
   eventQueue=eventQueue.then(()=>audio.event(JSON.parse(event.data))).catch(()=>{void close('识别结果处理失败，未完成额度会自动返还。');});
@@ -118,7 +157,7 @@ export async function realtimeRelay(request,env,upstream,runtime={}){
   if(closed||checking)return;checking=true;
   try{await renewLease(request,env,lease);const b=await serviceBudgetState(env),s=await settings(env);
    if(s.paused||(b.hardCents!==null&&(b.spentCny+b.reservedCny)*100>=b.hardCents))throw new MemberError('本站已达到紧急预算，已暂停新增消耗。',503);
-  }catch(error){void close(error instanceof MemberError?error.message:'服务检查失败，请重新连接。');}finally{checking=false;}
+  }catch(error){void close(error instanceof MemberError?error:'服务检查失败，请重新连接。');}finally{checking=false;}
  },15000);
  return runtime.upgrade?runtime.upgrade(client):new Response(null,{status:101,webSocket:client});
 }

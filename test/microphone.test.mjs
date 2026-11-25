@@ -39,3 +39,10 @@ test('on the phone itself, its built-in microphone remains eligible',()=>{
  assert.equal(isMobileDevice({userAgent:'Macintosh',platform:'MacIntel',maxTouchPoints:0}),false);
  assert.equal(chooseLocalMicrophone([phone],{mobile:true}).deviceId,'phone');
 });
+test('Android browsers exposing only a generic default input can capture without an exact default ID mismatch',async()=>{
+ const s=stream('physical-input','Audio input'),calls=[];
+ const media={enumerateDevices:async()=>[device('default','Default')],getUserMedia:async options=>{calls.push(options);return s;}};
+ assert.equal(await openLocalMicrophone(media,{mobile:true}),s);assert.equal(calls[0].audio.deviceId,undefined);
+ assert.equal(chooseLocalMicrophone([device('mic','Audio input')],{mobile:true}).deviceId,'mic');
+ assert.equal(chooseLocalMicrophone([device('default','Default')],{mobile:false}),null);
+});

@@ -1,3 +1,5 @@
+export const hasSubtitleText=row=>Boolean(typeof row.source==='string'&&row.source.trim()||typeof row.translation==='string'&&row.translation.trim());
+
 // These are conservative text cues, not a claim of grammatical understanding.
 // In particular, a recognizer-added full stop does not make a fragment complete.
 export function needsContinuation(text){
@@ -25,7 +27,7 @@ export class TranscriptMerger{
   if(!row.source.trim()){row.state='translated';return;}
   const prior=this.row,last=prior?.sourceParts.at(-1);
   if(prior&&(prior.sourceLanguage!==row.sourceLanguage||row.offset-last.offset>12000||prior.source.length+row.source.length>800))this.flush();
-  const part={id:row.id,offset:row.offset,source:row.source,sourceLanguage:row.sourceLanguage,...(typeof row.audioProof==='string'?{audioProof:row.audioProof}:{})};
+  const part={id:row.id,offset:row.offset,source:row.source,sourceLanguage:row.sourceLanguage,...(Number.isFinite(row.durationMs)?{durationMs:row.durationMs}:{}),...(typeof row.audioProof==='string'?{audioProof:row.audioProof}:{})};
   if(this.row){
    this.row.sourceParts.push(part);this.row.source=this.row.sourceParts.map(p=>p.source).join(' ');this.remove(row);
   }else{

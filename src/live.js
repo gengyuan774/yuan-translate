@@ -1,13 +1,14 @@
 import {reconnectWithBackoff} from './connection-recovery.js';
+import {serviceMessage} from './errors.js';
 import {translationMode} from './models.js';
 import {transcriptionConfig,language,setSessionLanguage} from './languages.js';
 import {authHeaders,accessConfig} from './access.js';
 import {Buffer} from 'buffer';
 import {getSession,saveSession,getMajorPreference,getTranslationModePreference,accountId} from './storage.js';
-import {AudioTurns,translateSegment} from './core.js';
+import {AudioTurns,translateRow} from './core.js';
 import {TranscriptMerger} from './transcript-merge.js';
 import {busy,getKey,complete} from './local-api.js';
-const lastOffset=session=>{const row=session.segments.at(-1);return row?.sourceParts?.at(-1)?.offset??row?.offset??0;};
+export const lastAudioEnd=session=>session.segments.reduce((end,row)=>Math.max(end,...(row.sourceParts?.length?row.sourceParts:[row]).map(part=>(Number(part.offset)||0)+(Number(part.durationMs)||0))),0);
 export class BrowserLive{
  constructor({connectionOwner=crypto.randomUUID()}={}){this.connectionOwner=connectionOwner;this.readyState=0;this.bufferedAmount=0;this.paused=true;this.pending=0;this.meta=[];this.queue=Promise.resolve();this.jobs=new Set();this.receivedTurns=new Set();this.turnRows=[];this.merger=new TranscriptMerger({submit:row=>this.enqueueTranslation(row),remove:row=>{this.session.segments=this.session.segments.filter(item=>item!==row);}});this.closed=false;this.closing=false;setTimeout(()=>{if(!this.closed){this.readyState=1;this.onopen?.();}},0);}
  emit(value){this.onmessage?.({data:JSON.stringify(value)});}
@@ -92,8 +93,14 @@ export class BrowserLive{
  }
  async command(e){
   if(e.type==='start'){
-   if(this.session)return;getKey();if(busy.has(e.id))throw new Error('当前课堂正在处理，请稍候');
-   this.owner=accountId();this.session=await getSession(e.id);this.session.major=await getMajorPreference();this.session.translationMode=await getTranslationModePreference();busy.add(e.id);this.session.summary='';this.started=Date.now();this.base=lastOffset(this.session)+1000;await this.connect();
+   if(this.session||this.closed)return;getKey();
+   const owner=accountId(),[session,major,mode]=await Promise.all([getSession(e.id),getMajorPreference(),getTranslationModePreference()]);
+   if(this.closed||this.session)return;
+   if(owner!==accountId())throw new Error('登录账号已变化，请重新打开课堂。');
+   if(busy.has(e.id))throw new Error('当前课堂正在处理，请稍候');
+   this.owner=owner;this.session=session;this.initialStatus=session.status;
+   session.major=major;session.translationMode=mode;busy.add(e.id);
+   this.started=Date.now();this.base=lastAudioEnd(session)+1000;await this.connect();
   }
   if(e.type==='pause'){this.paused=true;this.cancelRecovery();this.turns?.flush();this.merger.flush();this.session.status='paused';await this.persist();this.emit({type:'paused'});this.releasePausedConnection();}
   if(e.type==='resume'){
@@ -109,13 +116,13 @@ export class BrowserLive{
       while(this.pending>0&&!this.closed&&!this.closing&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,50));
       if(this.closed||this.closing)return;
       if(this.pending>0)throw new Error('上一段语音仍在识别，请稍后点击继续录音。');
-      this.meta=[];this.started=Date.now();this.base=lastOffset(this.session)+1000;
+      this.meta=[];this.started=Date.now();this.base=lastAudioEnd(this.session)+1000;
       await this.connect();return;
      }
      this.connectTimer=setTimeout(()=>{this.paused=true;this.emit({type:'fatal',message:'语言切换超时，请重新连接'});this.upstream.close();},20000);this.sendConfiguration();return;
     }
     this.paused=false;this.startHeartbeat();this.session.status='recording';await this.persist();this.emit({type:'ready'});}
-   else {this.paused=true;if(this.pending)this.warn('重新连接前部分语音未识别完成，记录可能存在缺失。');this.pending=0;this.meta=[];this.started=Date.now();this.base=lastOffset(this.session)+1000;await this.connect();}
+   else {this.paused=true;if(this.pending)this.warn('重新连接前部分语音未识别完成，记录可能存在缺失。');this.pending=0;this.meta=[];this.started=Date.now();this.base=lastAudioEnd(this.session)+1000;await this.connect();}
   }
   if(e.type==='finish'&&!this.closing&&!this.finishingRequested){this.finishingRequested=true;this.finishWithSummary=e.autoSummary===true;this.paused=true;this.cancelRecovery();await this.renewal;if(this.closed)return;this.closing=true;this.paused=true;this.turns?.flush();this.merger.flush();this.session.status='finishing';await this.persist();this.emit({type:'status',message:'正在收齐最后的字幕…'});this.finishTimer=setTimeout(()=>this.finalize(true),20000);this.finalize();}
  }
@@ -135,13 +142,13 @@ export class BrowserLive{
   if(this.upstream){this.drainTranscripts(true);this.merger.flush();this.upstream.onclose=null;this.upstream.onmessage=null;this.upstream.onerror=null;this.upstream.close();}clearTimeout(this.limitTimer);clearTimeout(this.connectTimer);
   const preflight=await fetch('/api/openai/status?owner='+this.connectionOwner,{headers:authHeaders(getKey()),cache:'no-store',signal:signal?AbortSignal.any([signal,AbortSignal.timeout(20000)]):AbortSignal.timeout(20000)});
   if(signal?.aborted||this.closed)throw new DOMException('恢复已取消','AbortError');
-  const availability=await preflight.json();if(!preflight.ok||availability.available===false){const error=new Error(availability.error?.message||availability.message||'无法建立录音连接');Object.assign(error,{status:preflight.status,code:availability.code,retryAt:availability.retryAt,recording:availability.recording});throw error;}
+  const availability=await preflight.json();if(!preflight.ok||availability.available===false){const problem=availability.error||availability;const error=new Error(serviceMessage(problem)||'无法建立录音连接');Object.assign(error,{status:preflight.status,code:problem.code,retryAt:problem.retryAt,recording:problem.recording});throw error;}
   const socketUrl=new URL('/api/openai/realtime',location.href);socketUrl.protocol=location.protocol==='https:'?'wss:':'ws:';
   socketUrl.searchParams.set('owner',this.connectionOwner);
   socketUrl.searchParams.set('title',this.session.title||'课堂');socketUrl.searchParams.set('mode',this.session.translationMode||'accurate');socketUrl.searchParams.set('language',language(this.session.sourceLanguage).code);
   const upstream=new WebSocket(socketUrl);this.upstream=upstream;this.connectedAt=Date.now();let bytes=0;
   const send=e=>{if(upstream.readyState===1)upstream.send(JSON.stringify(e));};
-  this.turns=new AudioTurns(b=>{bytes+=b.length;send({type:'input_audio_buffer.append',audio:b.toString('base64')});},()=>{this.meta.push({sourceLanguage:language(this.session.sourceLanguage).code,offset:Math.max(this.base,this.base+Date.now()-this.started-bytes/48)});bytes=0;this.pending++;send({type:'input_audio_buffer.commit'});},settings);
+  this.turns=new AudioTurns(b=>{bytes+=b.length;send({type:'input_audio_buffer.append',audio:b.toString('base64')});},()=>{this.meta.push({sourceLanguage:language(this.session.sourceLanguage).code,offset:Math.max(this.base,this.base+Date.now()-this.started-bytes/48),durationMs:bytes/48});bytes=0;this.pending++;send({type:'input_audio_buffer.commit'});},settings);
   const connected=new Promise((resolve,reject)=>{this.connectedResolve=resolve;this.connectedReject=reject;});
   const cleanup=()=>{signal?.removeEventListener('abort',abort);if(this.connectionAbortCleanup===cleanup)this.connectionAbortCleanup=null;};
   const abort=()=>{cleanup();clearTimeout(this.connectTimer);this.connectedReject?.(new DOMException('恢复已取消','AbortError'));upstream.onclose=null;upstream.close();};
@@ -158,7 +165,8 @@ export class BrowserLive{
    cleanup();this.connectedReject?.(new Error('实时连接已断开'));clearTimeout(this.connectTimer);clearTimeout(this.limitTimer);
    if(this.closed)return;if(this.closing){this.finalize(true);return;}if(this.renewing)return;
    if(this.hasRecorded&&!this.paused){void this.recoverConnection();return;}
-   this.paused=true;this.drainTranscripts(true);this.merger.flush();this.emit({type:'disconnected'});
+   const alreadyPaused=this.paused&&this.session.status==='paused';
+   this.paused=true;this.drainTranscripts(true);this.merger.flush();if(!alreadyPaused)this.emit({type:'disconnected'});
   };
   if(waitUntilReady)return connected;connected.catch(()=>{});
  }
@@ -174,10 +182,9 @@ export class BrowserLive{
    this.limitTimer=setTimeout(()=>this.renew(),Math.max(0,55*60*1000-(Date.now()-this.connectedAt)));
   }
   if(e.type==='input_audio_buffer.committed'){
+   if(this.receivedTurns.has(e.item_id)||s.segments.some(x=>x.id===e.item_id))return;
    const meta=this.meta.shift()||{sourceLanguage:language(s.sourceLanguage).code,offset:this.base+Date.now()-this.started};
-   if(!this.receivedTurns.has(e.item_id)&&!s.segments.some(x=>x.id===e.item_id)){
-    const row={id:e.item_id,...meta,source:'',translation:'',state:'transcribing'};s.segments.push(row);this.turnRows.push(row);
-   }
+   const row={id:e.item_id,...meta,source:'',translation:'',state:'transcribing'};s.segments.push(row);this.turnRows.push(row);
    await this.persist();
   }
   if(e.type==='conversation.item.input_audio_transcription.delta'){
@@ -190,18 +197,18 @@ export class BrowserLive{
    if(!this.turnRows.includes(row))this.turnRows.push(row);
    row.finalReceived=true;this.pending=Math.max(0,this.pending-1);
    if(e.type.endsWith('.failed')){row.state='failed';this.warn('有一段语音转写失败，课堂记录存在缺失。');}
-   else {row.source=e.transcript||'';if(typeof e.audioProof==='string'&&e.audioProof.length<=4096)row.audioProof=e.audioProof;this.noteTranscript(row.source);row.state='assembling';}
+   else {row.source=e.transcript||'';if(s.summary&&row.source.trim())s.summaryStale=true;if(typeof e.audioProof==='string'&&e.audioProof.length<=4096)row.audioProof=e.audioProof;this.noteTranscript(row.source);row.state='assembling';}
    this.drainTranscripts();
    if(this.paused||this.closing||this.finishingRequested)this.merger.flush();
    this.emit({type:'session',session:s});await this.persist();if(this.closing)this.finalize();
   }
   if(e.type==='error'){
-   const message=String(e.error?.message||'实时识别出错，请重新连接。').replace(/sk-[\w-]+/g,'[已隐藏]'),error=Object.assign(new Error(message),{code:e.error?.code,recording:e.error?.recording});
+   const message=String(serviceMessage(e.error)||'实时识别出错，请重新连接。').replace(/sk-[\w-]+/g,'[已隐藏]'),error=Object.assign(new Error(message),{code:e.error?.code,recording:e.error?.recording});
    clearTimeout(this.connectTimer);this.connectedReject?.(error);
    if(e.error?.retryable&&this.hasRecorded&&!this.paused){if(!this.renewing)void this.recoverConnection(message);return;}
    // Recovery owns attempt errors so retryable failures do not become fatal UI events.
    if(this.reconnecting)return;
-   this.paused=true;this.cancelRecovery();this.merger.flush();this.warn(message);this.emit({type:'fatal',message,...(e.error?.code==='recording_busy'?{code:e.error.code,recording:e.error.recording}:{})});
+   this.paused=true;if(this.hasRecorded||!this.initialStatus)this.session.status='paused';this.cancelRecovery();this.merger.flush();this.warn(message);this.emit({type:'fatal',message,...(e.error?.code==='recording_busy'?{code:e.error.code,recording:e.error.recording}:{})});
   }
  }
  drainTranscripts(force=false){
@@ -219,11 +226,14 @@ export class BrowserLive{
  enqueueTranslation(row){
   const s=this.session;row.state='translating';
   const job=this.queue.then(async()=>{
-   try{if(row.source.trim()){const index=s.segments.indexOf(row);Object.assign(row,await translateSegment(s,getKey(),row.source,s.segments.slice(Math.max(0,index-2),index).map(x=>x.source).join('\n'),undefined,row.sourceLanguage,text=>{row.translation=text;if(!this.closed)this.emit({type:'translation',id:row.id,translation:text});},row));}row.state='translated';}
+   try{
+    if(row.source.trim())Object.assign(row,await translateRow(s,getKey(),row,text=>{row.translation=text;if(!this.closed)this.emit({type:'translation',id:row.id,translation:text});}));
+    row.state='translated';delete row.error;
+   }
    catch(e){row.state='failed';row.error=e.message;this.warn('部分片段翻译失败，原文已保存。');}
    if(!this.closed)this.emit({type:'session',session:s});await this.persist();
   });
-  this.queue=job.catch(()=>{});this.jobs.add(job);job.then(()=>this.jobs.delete(job),()=>this.jobs.delete(job));
+  this.queue=job.catch(()=>{});this.jobs.add(job);job.then(()=>this.jobs.delete(job),()=>this.jobs.delete(job));return job;
  }
  async finalize(timeout=false){
   if(!this.closing||this.finalizing||(!timeout&&this.pending>0))return;this.finalizing=true;clearInterval(this.idleTimer);clearTimeout(this.finishTimer);clearTimeout(this.limitTimer);clearTimeout(this.connectTimer);
@@ -235,5 +245,5 @@ export class BrowserLive{
   try{await complete(this.session,{autoSummary});}catch(e){this.warn(e.message+(autoSummary?'；原文已保存，可稍后重新生成总结。':'；课堂保存尚未完成，请重新打开记录检查。'));}
   this.emit({type:'finished',session:this.session,autoSummary});this.close();
  }
- close(){if(this.closed)return;this.cancelRecovery();this.connectionAbortCleanup?.();this.stopHeartbeat();this.drainTranscripts(true);this.merger.flush();this.closed=true;this.connectedReject?.(new Error('连接已结束'));this.readyState=3;clearInterval(this.idleTimer);clearTimeout(this.pauseTimer);clearTimeout(this.connectTimer);clearTimeout(this.limitTimer);clearTimeout(this.finishTimer);if(this.upstream){this.upstream.onclose=null;this.upstream.close();}if(this.session){busy.delete(this.session.id);if(!this.finalizing){this.session.status='interrupted';this.persist();}}this.onclose?.();}
+ close(){if(this.closed)return;this.cancelRecovery();this.connectionAbortCleanup?.();this.stopHeartbeat();this.drainTranscripts(true);this.merger.flush();this.closed=true;this.connectedReject?.(new Error('连接已结束'));this.readyState=3;clearInterval(this.idleTimer);clearTimeout(this.pauseTimer);clearTimeout(this.connectTimer);clearTimeout(this.limitTimer);clearTimeout(this.finishTimer);if(this.upstream){this.upstream.onclose=null;this.upstream.close();}if(this.session){busy.delete(this.session.id);if(!this.finalizing&&(this.hasRecorded||!this.initialStatus)){this.session.status='interrupted';this.persist();}}this.onclose?.();}
 }

@@ -91,7 +91,12 @@ export async function exportPdf(session,{fontBytes,onProgress=()=>{},scope='all'
  if(session.warnings?.length){await heading('记录提示',13);for(const warning of session.warnings)await paragraph(clean(warning),{color:muted});}
  const segments=session.segments.filter(s=>s.source?.trim()||s.translation?.trim()||s.error);
  if(scope!=='summary'&&segments.length){await heading('原文与中文对照记录');for(const segment of segments){
-  ensure(60);await paragraph(timestamp(segment.offset),{size:9,leading:14,color:muted,gap:4});
+  const height=text=>lines(text,11,WIDTH).length*18+7;
+  const groupHeight=24+(segment.source?.trim()?height(segment.source):0)+(segment.translation?.trim()?height(segment.translation):0)+(segment.error?lines('提示：'+segment.error,9,WIDTH).length*15+7:0);
+  // Keep a short bilingual turn together. Oversized turns still paginate line
+  // by line instead of overflowing or creating an empty page.
+  ensure(groupHeight<=PAGE[1]-MARGIN*2-20?groupHeight:60);
+  await paragraph(timestamp(segment.offset),{size:9,leading:14,color:muted,gap:4});
   if(segment.source?.trim())await paragraph(clean(segment.source),{color:muted});
   if(segment.translation?.trim())await paragraph(clean(segment.translation));
   if(segment.error)await paragraph('提示：'+clean(segment.error),{size:9,leading:15,color:muted});y-=6;

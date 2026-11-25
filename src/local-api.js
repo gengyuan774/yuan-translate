@@ -1,5 +1,5 @@
 import {accountId,getTranslationModePreference,getMajorPreference,saveSession,getSession,listSessions,saveMaterial,getMaterial,removeMaterial,deleteSession} from './storage.js';
-import {summarize,translateSegment} from './core.js';
+import {canRetryTranslation,summarize,translateRow,translateSegment} from './core.js';
 import {getKey,accessConfig} from './access.js';
 import {validLanguage,setSessionLanguage} from './languages.js';
 export {getKey} from './access.js';
@@ -17,7 +17,19 @@ export async function complete(s,{autoSummary=true}={}){
 }
 async function parsedFile(file,name){
  if(file.size>20*1024*1024)throw new Error('每份资料最大 20 MB');
- const buffer=await file.arrayBuffer();return new Promise((resolve,reject)=>{const worker=new Worker('/parser-worker.js',{type:'module'});const timer=setTimeout(()=>{worker.terminate();reject(new Error('资料解析超时，请拆分后导入'));},45000);worker.onmessage=({data})=>{clearTimeout(timer);worker.terminate();data.error?reject(new Error(data.error)):resolve(data.result);};worker.onerror=()=>{clearTimeout(timer);worker.terminate();reject(new Error('资料解析失败，请尝试较小文件或转成 PDF'));};worker.postMessage({buffer,name},[buffer]);});
+ const buffer=await file.arrayBuffer();
+ return new Promise((resolve,reject)=>{
+  const worker=new Worker('/parser-worker.js',{type:'module'});
+  const timer=setTimeout(()=>{worker.terminate();reject(new Error('资料解析超时，请拆分后导入'));},45000);
+  const stop=()=>{clearTimeout(timer);worker.terminate();};
+  worker.onmessage=({data})=>{
+   // PDF.js can post its own worker-ready handshake before extraction finishes.
+   if(!data||(!Object.hasOwn(data,'result')&&!Object.hasOwn(data,'error')))return;
+   stop();if(data.error)reject(new Error(data.error));else resolve(data.result);
+  };
+  worker.onerror=()=>{stop();reject(new Error('资料解析失败，请尝试较小文件或转成 PDF'));};
+  worker.postMessage({buffer,name},[buffer]);
+ });
 }
 const demoSummary='## 课堂概览\n本节示例介绍机会成本：做出一种选择时，放弃的最佳替代方案的价值。\n## 核心知识点\n- 选择意味着取舍。\n- 机会成本可以包含金钱和时间。\n## 重要术语\n- Opportunity cost：机会成本\n## 作业\n示例中未提及。';
 export async function localApi(route,options={}){
@@ -33,10 +45,35 @@ export async function localApi(route,options={}){
   if(s.demo){s.title='经济学入门 · 演示课堂';s.status='completed';s.summary=demoSummary;s.segments=[{id:'demo',source:'Opportunity cost is the value of the next best alternative that you give up.',translation:'机会成本是你放弃的最佳替代方案的价值。',offset:0}];}
   await saveSession(s);return s;
  }
- const match=route.match(/^\/api\/sessions\/([a-f0-9-]{36})(?:\/(summary|try|materials)(?:\/([a-f0-9-]{36}))?)?$/);
+ const match=route.match(/^\/api\/sessions\/([a-f0-9-]{36})(?:\/(summary|try|materials|retry-translation)(?:\/([a-f0-9-]{36}))?)?$/);
  if(!match)throw new Error('未找到操作');
  const [,id,action,materialId]=match;
  if(busy.has(id)&&method!=='GET')throw new Error('请先完成当前课堂操作');
+ if(action==='retry-translation'){
+  if(method!=='POST')throw new Error('不支持此操作');
+  const owner=accountId(),key=getKey();busy.add(id);
+  try{
+   const read=async()=>{
+    const session=await getSession(id);
+    if(accountId()!==owner)throw new Error('登录账号已变化，请重新打开课堂后翻译。');
+    return session;
+   };
+   const session=await read(),row=session.segments.find(part=>part.id===data.segmentId);
+   if(!row||session.demo)throw new Error('这段字幕无法补译，请重新打开课堂。');
+   if(!canRetryTranslation(row))return session;
+   const result=await translateRow(session,key,row);
+   if(accountId()!==owner)throw new Error('登录账号已变化，请重新打开课堂后翻译。');
+   // Keep edits made while the translation was running, including a deletion
+   // or a successful retry on another device.
+   const latest=await read(),target=latest.segments.find(part=>part.id===row.id);
+   if(!target||target.source!==row.source)throw new Error('这段原文已变化，请重新打开课堂。');
+   if(canRetryTranslation(target)){
+    Object.assign(target,result,{state:'translated'});delete target.error;
+    await saveSession(latest,{owner,background:true});
+   }
+   return latest;
+  }finally{busy.delete(id);}
+ }
  if(!action&&method==='DELETE')return deleteSession(id);
  const s=await getSession(id);
  if(!action){if(method==='PATCH'){if(s.demo)throw new Error('演示课堂使用固定英语内容');setSessionLanguage(s,data.sourceLanguage);await saveSession(s);}return s;}

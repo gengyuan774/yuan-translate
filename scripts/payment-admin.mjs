@@ -1,15 +1,12 @@
-import {readFileSync,statSync,writeFileSync} from 'node:fs';
+import {writeFileSync} from 'node:fs';
+import {loadAdminConfig} from './admin-config.mjs';
 const [command='list',id,arg,reason,requestId]=process.argv.slice(2);
 const usage='Usage: node scripts/payment-admin.mjs list [before]; get ORDER; reconcile ORDER "reason"; refund ORDER CENTS "reason" UUID; refund-query ORDER REFUND_ID "reason"; export ABSOLUTE.csv';
 if(!['list','get','reconcile','refund','refund-query','export'].includes(command))throw new Error(usage);
 if(['get','reconcile','refund','refund-query'].includes(command)&&!/^[a-f0-9]{32}$/.test(id||''))throw new Error(usage);
 if(command==='reconcile'&&!arg?.trim()||['refund','refund-query'].includes(command)&&!reason?.trim())throw new Error('An operation reason is required. '+usage);
 if(command==='refund'&&(!/^[1-9]\d*$/.test(arg||'')||!Number.isSafeInteger(Number(arg))||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(requestId||'')))throw new Error('Refund amount is integer CNY cents. Reuse the SAME request UUID after a timeout. '+usage);
-const secretFile=new URL('../.env.member-admin',import.meta.url);
-if(statSync(secretFile).mode&0o077)throw new Error('Administrator credential file must have mode 600.');
-const secret=readFileSync(secretFile,'utf8').match(/^MEMBER_ADMIN_TOKEN=([a-f0-9]{64})$/m)?.[1];
-if(!secret)throw new Error('Administrator credential missing');
-const origin='https://classroom-notes-gengyuan.xiangyuguan.chatgpt.site';
+const {secret,origin}=loadAdminConfig();
 async function call(path,body){
  const r=await fetch(origin+'/api/admin/payments'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+secret,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined,redirect:'error',signal:AbortSignal.timeout(60000)});
  const data=await r.json();if(!r.ok)throw new Error(data.error?.message||'Payment operation failed; check the order before retrying.');return data;

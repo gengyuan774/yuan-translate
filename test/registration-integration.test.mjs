@@ -23,12 +23,13 @@ async function success(response){assert.equal(response.status,200,await response
 const sessionCookie=response=>response.headers.get('Set-Cookie')?.split(';')[0];
 
 test('the complete HTTP registration chain grants a secure session, one trial and repeat login without refilling it',async()=>{
- const f=fixture(),response=await f.register('HTTPChain'),data=await success(response),cookie=sessionCookie(response);
+ const shortPassword='Pine482k';
+ const f=fixture(),response=await f.register('HTTPChain',shortPassword),data=await success(response),cookie=sessionCookie(response);
  assert.match(response.headers.get('Set-Cookie'),/HttpOnly; Secure; SameSite=Strict/);assert.equal(data.user.label,'httpchain');assert.equal(data.user.trial.remainingMinutes,60);
  assert.equal((await success(await f.call('/api/account',undefined,cookie))).user.id,data.user.id);
  const usage=await success(await f.call('/api/account/usage',undefined,cookie));assert.equal(usage.tier,'trial');assert.equal(usage.remainingMinutes,60);
  await success(await f.call('/api/account/logout',{},cookie));assert.equal((await success(await f.call('/api/account',undefined,cookie))).user,null);
- const signedIn=await success(await f.call('/api/account/login/password',{username:'httpchain',password}));assert.equal(signedIn.user.id,data.user.id);
+ const signedIn=await success(await f.call('/api/account/login/password',{username:'httpchain',password:shortPassword}));assert.equal(signedIn.user.id,data.user.id);
  assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM accounts').get().n,1);assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM account_trials').get().n,1);assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM trial_claims').get().n,1);
  assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM registration_challenges WHERE claimed_at IS NOT NULL').get().n,1);
 });
@@ -71,13 +72,13 @@ test('a previously granted legacy trial is preserved as a marker during deletion
  assert.equal(f.sql.prepare('SELECT COUNT(*) n FROM account_trials').get().n,0);
 });
 
-test('legacy eight-character passwords still log in while new registrations reject short, common and account-name passwords',async()=>{
- const f=fixture(),legacy='oldpass8';
+test('legacy eight-character passwords still log in while registration enforces the new password rules',async()=>{
+ const f=fixture(),legacy='oldpassw';
  f.sql.prepare('INSERT INTO accounts(id,provider,subject_hash,label,created_at) VALUES(?,?,?,?,?)').run('legacy-eight','password','legacy-fixture','legacyuser',1);
  f.sql.prepare('INSERT INTO account_passwords(username,account_id,password_hash,created_at) VALUES(?,?,?,?)').run('legacyuser','legacy-eight',await hashPassword(legacy),1);
  const signedIn=await success(await f.call('/api/account/login/password',{username:'legacyuser',password:legacy}));assert.equal(signedIn.user.id,'legacy-eight');assert.equal(signedIn.user.trial.eligible,false);
  const username='weakchain',challenge=await mintRegistration(f.env,username,{headers:f.headers});
- for(const weak of [legacy,'passwordpassword','abcd'.repeat(4)]){
+ for(const weak of ['Short7!',legacy,'passwordpassword','abcd'.repeat(4)]){
   const rejected=await f.call('/api/account/register/password',{username,password:weak,registration:challenge.registration},challenge.cookie);assert.equal(rejected.status,400);assert.equal((await rejected.json()).error.message,newPasswordError(weak,username));
  }
  const named=await f.register('complicated_name','complicated_name');assert.equal(named.status,400);assert.match((await named.json()).error.message,/账号名/);
@@ -85,8 +86,9 @@ test('legacy eight-character passwords still log in while new registrations reje
 });
 
 test('registration, password changes and email recovery apply the same new-password policy',async t=>{
- const f=fixture(),username='policychain',registered=await f.register(username),user=await success(registered),cookie=sessionCookie(registered),weak='passwordpassword';
+ const f=fixture(),username='policychain',registered=await f.register(username),user=await success(registered),cookie=sessionCookie(registered),weak='abcdefgh';
  const expected=newPasswordError(weak,username),before=f.sql.prepare('SELECT password_hash FROM account_passwords WHERE account_id=?').get(user.user.id).password_hash;
+ assert.match(expected,/至少包含两类/);
  const rejectedRegistration=await f.register('newpolicychain',weak);assert.equal(rejectedRegistration.status,400);assert.equal((await rejectedRegistration.json()).error.message,expected);
  const changed=await f.call('/api/account/password/change',{currentPassword:password,newPassword:weak},cookie);assert.equal(changed.status,400);assert.equal((await changed.json()).error.message,expected);
  Object.assign(f.env,{RECOVERY_EMAIL_PROVIDER:'resend',RESEND_API_KEY:'synthetic-email-test-only',RECOVERY_EMAIL_FROM:'test@example.test'});let code;
@@ -98,7 +100,7 @@ test('registration, password changes and email recovery apply the same new-passw
  const recovered=await f.call('/api/account/recovery/reset/verify',{challengeId:reset.challengeId,code,newPassword:weak});assert.equal(recovered.status,400);assert.equal((await recovered.json()).error.message,expected);
  assert.equal(f.sql.prepare('SELECT password_hash FROM account_passwords WHERE account_id=?').get(user.user.id).password_hash,before);
  assert.ok(f.sql.prepare('SELECT id FROM recovery_challenges WHERE id=?').get(reset.challengeId),'A weak new password must leave the valid recovery code usable');
- const next='A new meadow lesson after autumn 824!';
+ const next='42!83#17';
  await success(await f.call('/api/account/recovery/reset/verify',{challengeId:reset.challengeId,code,newPassword:next}));
  assert.equal((await success(await f.call('/api/account',undefined,cookie))).user,null);
  assert.equal((await success(await f.call('/api/account/login/password',{username,password:next}))).user.id,user.user.id);

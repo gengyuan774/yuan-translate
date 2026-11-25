@@ -81,3 +81,14 @@ dialog{background:#fff;color:#454c56;border-color:#e6e9ed;box-shadow:0 22px 80px
 .recording-continuity{margin:12px 0 22px;color:#7a8590;font-size:12px;line-height:1.8}
 
 .control-actions{flex-wrap:wrap}.control-actions button{white-space:nowrap}@media(max-width:420px){.control-actions{width:100%;margin-left:0}.control-actions button{flex:1;padding:10px 7px}}
+:root{--auth-error:#a4432d}
+.form-feedback{font-size:14px;line-height:1.7;padding:12px 14px;margin:18px 0 0;border:1px solid #d8e5ef;border-radius:8px;background:#f0f6fb;color:#3e6584;overflow-wrap:anywhere;scroll-margin:24px}
+.form-feedback[data-state="error"]{background:#fff4ee;border-color:#edc6b6;color:var(--auth-error)}
+.profile-page input[aria-invalid="true"]{border-color:#bd684f;box-shadow:0 0 0 1px #bd684f}
+.form-feedback:focus{outline:2px solid #a8c4d9;outline-offset:3px}
+.segment .retry-translation{margin-inline-start:.4rem;padding:.35rem .6rem;border:1px solid #c9d8e4;border-radius:.5rem;background:#f4f8fc;color:#365f80;font:inherit;font-size:.875rem;cursor:pointer}
+@media(max-width:620px){
+ .title-row>div:first-child{flex:1;min-width:0}
+ .title-row #title{width:100%}
+ .classroom-preferences{flex-shrink:0}
+}

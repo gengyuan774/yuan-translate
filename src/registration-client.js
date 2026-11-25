@@ -1,19 +1,13 @@
+import {accountRequest} from './account-client.js';
 const cancelled=()=>Object.assign(new Error('注册安全校验已取消。'),{name:'AbortError'});
-const message=(data,fallback)=>typeof data?.error?.message==='string'?data.error.message.slice(0,300):fallback;
 export class RegistrationClient{
  constructor({fetcher=fetch,workerFactory=()=>new Worker('/registration-proof-worker.js',{type:'module'}),now=Date.now,workerTimeoutMs=45000,requestTimeoutMs=15000}={}){Object.assign(this,{fetcher:fetcher.bind(globalThis),workerFactory,now,workerTimeoutMs,requestTimeoutMs});this.current=null;}
  cancel(){if(this.current)this.current.controller.abort();}
  active(operation){if(operation.controller.signal.aborted||this.current!==operation)throw cancelled();}
  async post(path,body,operation){
-  let timedOut=false;
-  const timer=setTimeout(()=>{timedOut=true;operation.controller.abort();},this.requestTimeoutMs);
-  try{
-   const response=await this.fetcher(path,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:operation.controller.signal});
-   this.active(operation);const data=await response.json();this.active(operation);
-   if(!response.ok)throw new Error(message(data,'注册暂时无法完成，请重试。'));
-   return data;
-  }catch(error){if(timedOut)throw new Error('注册连接超时，请检查网络后重试。');if(operation.controller.signal.aborted)throw cancelled();throw error;}
-  finally{clearTimeout(timer);}
+  this.active(operation);
+  const data=await accountRequest(path,{body,signal:operation.controller.signal,timeoutMs:this.requestTimeoutMs,fetcher:this.fetcher});
+  this.active(operation);return data;
  }
  async solve(challenge,operation){
   this.active(operation);let worker;
