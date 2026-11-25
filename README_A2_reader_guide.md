@@ -1,31 +1,36 @@
 # Yuan Translate: Assignment 2 reader guide
 
-Prose word count: 354 (excluding code commands).
+Prose word count: 505 (excluding code and link destinations).
 
 ## Scope and status
 
-Yuan Translate is an existing web application for lecture transcription, Chinese translation and notes. The site presents source and translated text together and uses the selected subject and relevant text from course materials as context. Audio capture, server relay, translation, lesson history and export are implemented in the repository, subject to service configuration and account access. Uploaded documents are processed as text; images are not interpreted.
+Yuan Translate supports lectures through transcription, Chinese translation, selected course materials and notes. Source and translated segments are shown together. Audio capture, server relay, translation, local history and export are implemented, subject to service configuration and access. Imported documents contribute their text layer, not visual interpretation of images.
 
-The earlier Week 3 two-entry glossary and clarification gate were a manual simulation. The current site is not presented as having that term-level chooser. Translation accuracy, calibrated confidence and reduced classroom distraction are not established.
+The earlier Week 3 two-entry glossary and clarification gate were a manual simulation, not an implemented term chooser on this site. Translation accuracy, calibrated confidence and reduced classroom distraction have not been established.
 
-## Inspecting the work
+## Technology and inspection
 
-Open [the public demonstration](https://yuantranslate-classroom.noble-flute-7938.chatgpt.site/) and select **Experience example** / **体验示例**. The preset lesson shows bilingual text and sample notes without using a microphone or calling the model. The repository includes source under `src/`, automated tests under `test/`, and the 20 November software-test report under `docs/`. Online speech and translation require the configured service and suitable access.
+The browser interface is JavaScript with IndexedDB for local data. A Cloudflare-compatible Worker handles server requests; D1 and R2 store account information and lesson content. The source configures OpenAI gpt-transcribe for transcription and gpt-4.1-mini for text generation ([models](https://github.com/gengyuan774/yuan-translate/blob/202e1a12f110c8aa48461a22a600832537a7db74/src/models.js)). Selected material is retrieved as context; the model is instructed not to treat the material as instructions or invent content absent from speech ([prompt](https://github.com/gengyuan774/yuan-translate/blob/202e1a12f110c8aa48461a22a600832537a7db74/src/translation-prompt.js)). These instructions do not guarantee correctness.
 
-To inspect the code locally, install the project's Node dependencies and run the commands below. Automated tests use simulated responses and do not by themselves establish live-service performance.
+Open [the public demonstration](https://yuantranslate-classroom.noble-flute-7938.chatgpt.site/) and select **Experience example / 体验示例**. The preset lesson displays bilingual text and sample notes without a microphone or AI call. For code inspection, Node 22.22.1 was used. From the repository root:
 
-```sh
-npm ci
-npm run build
-npm test
-```
+    npm ci
+    npm run build
+    npm test
 
-## Development record
+Live speech and translation additionally require an appropriately configured server, service credentials, database and account access. An operator must configure their own server-side credentials; never commit an API key or place it in the browser. See the repository [main README](https://github.com/gengyuan774/yuan-translate/blob/main/README.md) for deployment details.
 
-- The Week 3 manual walkthrough changed an unsupported default meaning into a request for context. This remains evidence of an early design decision, not a live feature claim.
-- [Commit 2a3b554](https://github.com/gengyuan774/yuan-translate/commit/2a3b5542679c04ef62d98f8fc75daf61363916ab) documents recovery of interrupted recordings; [commit d362e2b](https://github.com/gengyuan774/yuan-translate/commit/d362e2b0988201785d9f457dd85fc85ae87eefca) separates ending a recording from requesting a summary.
-- [Commit b9319a3](https://github.com/gengyuan774/yuan-translate/commit/b9319a371c5bce151608fb1284a7c237784a9428) syncs the classroom release and adds the dated test report. That report states 342 automated tests passed. Its tests were not rerun during preparation of this guide and do not demonstrate real classroom translation accuracy.
+## Development and checks
 
-## AI assistance and review
+- The Week 3 manual walkthrough changed an unsupported default meaning into a request for context; the current application instead uses subject and material context.
+- [Commit 2a3b554](https://github.com/gengyuan774/yuan-translate/commit/2a3b5542679c04ef62d98f8fc75daf61363916ab) added recovery after interrupted recording, while [d362e2b](https://github.com/gengyuan774/yuan-translate/commit/d362e2b0988201785d9f457dd85fc85ae87eefca) separated stopping recording from requesting a summary. These changes address continuity and user control.
+- [Commit b9319a3](https://github.com/gengyuan774/yuan-translate/commit/b9319a371c5bce151608fb1284a7c237784a9428) contains the 20 November test report, which states that 342 tests passed. That complete suite was not rerun for this report.
+- On 25 November, Codex reran 32 selected cases from six existing test files using a partial local copy of [commit 202e1a1](https://github.com/gengyuan774/yuan-translate/commit/202e1a12f110c8aa48461a22a600832537a7db74); 32 passed. The copied source and test files were checked against the commit's Git blob hashes. The cases cover reference selection, stopping and summarising, microphone handling, recovery, classroom navigation and save feedback. These are isolated tests with simulated inputs, not a live classroom evaluation:
 
-Codex assisted in preparing the Assignment 2 report, diagrams and this reader guide. During preparation, the assistant compared its claims against the existing repository, the published demonstration, the course materials and the dated test report. The demonstration uses preset data and makes no AI call. Earlier development assistance and the student's own decisions and checks should be added here where applicable before submission.
+    node --test test/capture-health.test.mjs test/microphone.test.mjs test/classroom-navigation.test.mjs test/summary-save-feedback.test.mjs test/finish-recording.test.mjs test/cost-optimization.test.mjs
+
+No real lecture user study or live translation accuracy result is claimed. The earlier test report is in the repository's docs folder; no additional ZIP is required.
+
+## Authorship and AI assistance
+
+The student supplied the project and requested publication of the site and repository. Codex assisted with the report, diagrams, this guide and the checks described above. It compared the proposed term-level gate with the existing site and labelled the gate as a simulation; the retry storyboard was marked as a code-based illustration rather than a live-tested screenshot. The existing application predates this report. Any earlier AI assistance and the student's own development decisions and checks still need to be verified by the student before submission.
